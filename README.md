@@ -74,15 +74,18 @@ No training required — only the pretrained diffusion model and precomputed pre
 
 ### Training-Required
 
-**3. Latent Diffusion in Beta-VAE Space** *(most principled)*
+**3. Pixel-Space Diffusion Conditioned on Beta-VAE Latent** *(most principled)*
 
-Since beta-VAE latents and neurons share a coordinate system, superstimuli are exact by construction.
+Since beta-VAE latents and neurons share a coordinate system, superstimuli are exact by construction. The pipeline is:
+
+$$\text{neuron firing rates} \xrightarrow{\text{linear map (axis-tuning)}} z \in \mathbb{R}^N \xrightarrow{p(x \mid z),\ \text{diffusion}} \text{natural image}$$
+
+The beta-VAE decoder alone produces blurry images because a low-dimensional $z$ cannot encode all high-frequency detail; a deterministic decoder averages over that ambiguity. A diffusion model conditioned on $z$ instead models $p(x \mid z)$, stochastically generating sharp, natural images consistent with the latent code.
 
 1. Encode all training images to beta-VAE latents $z \in \mathbb{R}^N$ ($N$ = 10–50)
-2. Train a diffusion model (DDPM or LDM) over $z$ — cheap due to low dimensionality
-3. Train a high-quality decoder: finetune the beta-VAE decoder or train a pixel-space diffusion model conditioned on $z$
-4. At inference: set $z$ with dimension $i$ scaled up, generate via the decoder
-5. Superstimulus: $z_i \to z_i + \Delta$, $z_j$ fixed for $j \neq i$
+2. Train a pixel-space diffusion model conditioned on $z$: given $z$, denoise from $\mathcal{N}(0, I)$ to a full-resolution natural image
+3. The linear map from neuron firing rates to $z$ is precomputed from the axis-tuning analysis — no neural data needed if using beta-VAE latents directly
+4. Superstimulus: set $z_i \to z_i + \Delta$, $z_j$ fixed for $j \neq i$, then generate
 
 Selectivity is structurally guaranteed by beta-VAE disentanglement, not just encouraged.
 
