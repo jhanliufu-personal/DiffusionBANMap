@@ -89,6 +89,12 @@ The beta-VAE decoder alone produces blurry images because a low-dimensional $z$ 
 
 Selectivity is structurally guaranteed by beta-VAE disentanglement, not just encouraged.
 
+**Validation:** Re-encode the generated superstimulus with the beta-VAE encoder and check that only the targeted dimension changed. Because the diffusion model is stochastic, re-encoding won't recover $z$ exactly, so the check is quantitative: the change in $\hat{z}_i$ should be large relative to changes in all other dimensions. A natural metric is:
+
+$$R_i = \frac{|\hat{z}_i - z_i|}{\frac{1}{N-1}\sum_{j \neq i} |\hat{z}_j - z_j|}$$
+
+$R_i \gg 1$ across many superstimulus trials indicates the diffusion model respects the latent structure.
+
 **4. Adapter / ControlNet Conditioned on Neuron Activation Vector**
 
 Train a lightweight adapter mapping neuron activations into the conditioning space of a frozen pretrained diffusion model.
