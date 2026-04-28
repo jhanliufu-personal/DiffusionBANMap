@@ -1,4 +1,4 @@
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 from PIL import Image
@@ -8,18 +8,27 @@ from torchvision import transforms
 
 class FaceDataset(Dataset):
 
-    def __init__(self, image_paths: List[str], image_size: Tuple[int, int]):
+    def __init__(self, image_paths: List[str], image_size: Tuple[int, int], eager: bool = False):
         self.image_paths = image_paths
         self.transform = transforms.Compose([
             transforms.Resize(image_size),
             transforms.CenterCrop(image_size),
             transforms.ToTensor(),  # → [0, 1], shape [C, H, W]
         ])
+        # Pre-load all images into RAM as tensors to avoid per-batch file I/O
+        self._cache: Optional[torch.Tensor] = None
+        if eager:
+            self._cache = torch.stack([
+                self.transform(Image.open(p).convert("RGB"))
+                for p in image_paths
+            ])
 
     def __len__(self) -> int:
         return len(self.image_paths)
 
     def __getitem__(self, idx: int) -> torch.Tensor:
+        if self._cache is not None:
+            return self._cache[idx]
         image = Image.open(self.image_paths[idx]).convert("RGB")
         return self.transform(image)
 
