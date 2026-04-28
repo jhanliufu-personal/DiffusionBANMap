@@ -79,16 +79,16 @@ def bernoulli_loss(
 
     if activation == 'logits':
         # Binary cross entropy with logits: sum over pixels (dim=1)
-        # loss = F.binary_cross_entropy_with_logits(
-        #     reconstructed_images,
-        #     true_images,
-        #     reduction='none'
-        # ).sum(dim=1)
         loss = F.binary_cross_entropy_with_logits(
             reconstructed_images,
             true_images,
             reduction='none'
-        ).mean(dim=1)
+        ).sum(dim=1)
+        # loss = F.binary_cross_entropy_with_logits(
+        #     reconstructed_images,
+        #     true_images,
+        #     reduction='none'
+        # ).mean(dim=1)
     elif activation == 'tanh':
         # Convert tanh output to [0, 1] range and clip
         reconstructed_images = torch.clamp(
