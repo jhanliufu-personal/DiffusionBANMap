@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Virtual environment
+.venv/
+uv.lock
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Data and outputs
+datasets/
+outputs/
+*.pkl
+*.npy
+*.npz
+*.pt
+*.pth
+
+# Wandb
+wandb/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+*:Zone.Identifier
+*.Zone.Identifier
+*Zone.Identifier

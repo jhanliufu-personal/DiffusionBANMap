@@ -1,0 +1,37 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "diffusion-ban-map"
+version = "0.1.0"
+description = "Neuron-guided natural image generation via diffusion conditioned on beta-VAE latents"
+requires-python = ">=3.11"
+
+dependencies = [
+    # Core deep learning
+    "torch>=2.2.0",
+    "torchvision>=0.17.0",
+    # Diffusion models
+    "diffusers>=0.27.0",
+    "transformers>=4.40.0",
+    "accelerate>=0.29.0",
+    # Scientific computing
+    "numpy>=1.26.0",
+    "scipy>=1.13.0",
+    "scikit-learn>=1.4.0",
+    # Visualization
+    "matplotlib>=3.8.0",
+    "pillow>=10.3.0",
+    # Utilities
+    "tqdm>=4.66.0",
+    "ipykernel>=6.29.0",
+    "wandb>=0.26.1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["models", "scripts"]
+
+[tool.uv]
+# PyTorch with CUDA 11.8 — change cu118 to cu121 or cpu as needed
+find-links = ["https://download.pytorch.org/whl/cu118"]
