@@ -22,3 +22,10 @@ class FaceDataset(Dataset):
     def __getitem__(self, idx: int) -> torch.Tensor:
         image = Image.open(self.image_paths[idx]).convert("RGB")
         return self.transform(image)
+
+    def remap_paths(self, old_prefix: str, new_prefix: str) -> None:
+        """Rewrite stored image paths for cross-machine portability (e.g. Windows → Colab)."""
+        self.image_paths = [
+            new_prefix + p[len(old_prefix):].replace("\\", "/")
+            for p in self.image_paths
+        ]
