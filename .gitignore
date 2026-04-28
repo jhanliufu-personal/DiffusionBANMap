@@ -13,7 +13,7 @@ uv.lock
 
 # Jupyter
 .ipynb_checkpoints/
-*.ipynb
+# *.ipynb
 
 # Data and outputs
 datasets/
