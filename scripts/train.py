@@ -5,7 +5,7 @@ import argparse
 import pickle as pkl
 from dataclasses import asdict
 from typing import Tuple, Optional
-from data_utils import FaceDataset  # noqa: F401 — needed for pickle to resolve FaceDataset
+from data_utils import PreloadedDataset
 from models.beta_vae import BetaVAE
 from scripts.config import TrainingConfig
 from torch.utils.data import DataLoader
@@ -15,43 +15,22 @@ from utils import discover_device, count_model_params
 
 
 def _setup_data_loaders(
-    train_dataset_path: Optional[str], 
-    test_dataset_path: Optional[str], 
+    train_dataset_path: Optional[str],
+    test_dataset_path: Optional[str],
     batch_size: int = 32
 ) -> Tuple[Optional[DataLoader], Optional[DataLoader]]:
 
-    train_loader = None
-    test_loader = None
+    def make_loader(path: Optional[str], shuffle: bool) -> Optional[DataLoader]:
+        if not path:
+            return None
+        with open(path, 'rb') as f:
+            tensor = pkl.load(f)  # [N, C, H, W]
+        dataset = PreloadedDataset(tensor)
+        loader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=4)
+        print(f"{path}: {len(dataset)} images, {len(loader)} batches/epoch")
+        return loader
 
-    if train_dataset_path:
-        with open(train_dataset_path, 'rb') as f:
-            train_dataset = pkl.load(f)
-
-        train_loader = DataLoader(
-            train_dataset, 
-            batch_size=batch_size, 
-            shuffle=True, 
-            num_workers=4
-        )
-
-        print(f"Train dataset: {len(train_dataset)} images")
-        print(f"Train batches per epoch: {len(train_loader)}")
-    
-    if test_dataset_path:
-        with open(test_dataset_path, 'rb') as f:
-            test_dataset = pkl.load(f)
-
-        test_loader = DataLoader(
-            test_dataset, 
-            batch_size=batch_size, 
-            shuffle=False, 
-            num_workers=4
-        )
-    
-        print(f"Test dataset: {len(test_dataset)} images")      
-        print(f"Test batches: {len(test_loader)}")
-
-    return train_loader, test_loader
+    return make_loader(train_dataset_path, shuffle=True), make_loader(test_dataset_path, shuffle=False)
 
 
 if __name__ == "__main__":
@@ -88,7 +67,7 @@ if __name__ == "__main__":
     # Init wandb session
     wandb.init(
         project="diffusion_ban_map",
-        name=f"{config.experiment_name}_run1",
+        name=f"{config.experiment_name}_run3",
         notes="Overfit beta VAE on mini batch to debug",
         config=asdict(config)
     )
