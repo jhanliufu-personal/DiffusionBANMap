@@ -5,6 +5,7 @@ import argparse
 import pickle as pkl
 from dataclasses import asdict
 from typing import Tuple, Optional
+from data_utils import FaceDataset  # noqa: F401 — needed for pickle to resolve FaceDataset
 from models.beta_vae import BetaVAE
 from scripts.config import TrainingConfig
 from torch.utils.data import DataLoader
@@ -87,7 +88,7 @@ if __name__ == "__main__":
     # Init wandb session
     wandb.init(
         project="diffusion_ban_map",
-        name=f"{config.experiment_name}_v1",
+        name=f"{config.experiment_name}_run1",
         notes="Overfit beta VAE on mini batch to debug",
         config=asdict(config)
     )

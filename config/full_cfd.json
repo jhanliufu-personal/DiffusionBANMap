@@ -1,0 +1,24 @@
+{
+    "experiment_name": "betavae_full_cfd",
+    "output_dir": "./outputs/betavae_full_cfd",
+
+    "train_dataset_path": "./datasets/full_cfd_train.pkl",
+    "test_dataset_path": "./datasets/full_cfd_val.pkl",
+    "batch_size": 32,
+
+    "input_channels": 3,
+    "input_height": 64,
+    "input_width": 64,
+    "latent_dim": 10,
+    "hidden_dim": 128,
+    "beta": 4.0,
+
+    "lr": 1e-4,
+    "weight_decay": 1e-5,
+    "max_grad_norm": 1.0,
+
+    "num_epochs": 200,
+    "log_interval": 1,
+    "eval_interval": 5,
+    "ckpt_interval": 20
+}

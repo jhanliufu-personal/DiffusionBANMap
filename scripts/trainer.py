@@ -8,6 +8,7 @@ import json
 import time
 import torch
 import wandb
+from dataclasses import asdict
 from typing import Optional, Dict
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
@@ -54,7 +55,7 @@ class BetaVAETrainer:
         # Save config to output directory
         config_save_path = os.path.join(self.config.output_dir, 'config.json')
         with open(config_save_path, 'w') as f:
-            json.dump(self.config, f, indent=2)
+            json.dump(asdict(self.config), f, indent=2)
         
         print(f"Trainer initialized. Output directory: {self.config.output_dir}")
     
@@ -83,6 +84,8 @@ class BetaVAETrainer:
             train_metrics = self.train_epoch()
             # Total elapsed time = time accumulated before this run + time elapsed in this session
             elapsed_time = elapsed_time_offset + (time.time() - self.start_time)
+
+            # print(f"Epoch {self.step} / {self.config.num_epochs}: loss = {train_metrics['total_loss']:.4f}")
 
             # Log metrics with wandb
             if not self.step % self.config.log_interval:
@@ -173,7 +176,7 @@ class BetaVAETrainer:
 
             epoch_metrics["grad_norm_mean"] += grad_norm.item()
             epoch_metrics["grad_norm_max"] = max(epoch_metrics.get("grad_norm_max", 0), grad_norm.item())
-            epoch_metrics["clip_frac"] += float(grad_norm.item() > self.config.max_grad_norm)
+            epoch_metrics["grad_clip_frac"] += float(grad_norm.item() > self.config.max_grad_norm)
 
         # Average metrics over epoch
         for key in epoch_metrics:
