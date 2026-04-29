@@ -21,7 +21,7 @@
     "num_timesteps": 1000,
     "beta_schedule": "cosine",
     "min_snr_gamma": 5.0,
-    "cfg_uncond_prob": 0.15,
+    "cfg_uncond_prob": 0,
 
     "lr": 2e-4,
     "weight_decay": 0.0,
