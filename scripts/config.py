@@ -61,6 +61,7 @@ class DiffusionConfig:
     # Diffusion
     num_timesteps: int
     beta_schedule: str      # 'linear' or 'cosine'
+    min_snr_gamma: float    # Min-SNR-γ loss weighting (Hang et al. 2023); 5.0 is standard
 
     # Optimizer
     lr: float

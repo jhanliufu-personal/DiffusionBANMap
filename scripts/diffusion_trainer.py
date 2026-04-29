@@ -70,6 +70,8 @@ class DiffusionTrainer(BaseTrainer):
         self.register_buffer('betas', betas)
         self.register_buffer('sqrt_alphas_cumprod', alphas_cumprod.sqrt())
         self.register_buffer('sqrt_one_minus_alphas_cumprod', (1 - alphas_cumprod).sqrt())
+        # SNR_t = ᾱ_t / (1 - ᾱ_t); used for Min-SNR-γ loss weighting
+        self.register_buffer('snr', alphas_cumprod / (1.0 - alphas_cumprod))
 
     # ── Training loop ─────────────────────────────────────────────────────────
 
@@ -132,7 +134,14 @@ class DiffusionTrainer(BaseTrainer):
 
         self.optimizer.zero_grad()
         eps_pred = self.model(x_t, t, z)
-        loss = F.mse_loss(eps_pred, eps)
+
+        # Min-SNR-γ weighting: downweight easy high-noise timesteps so the model
+        # is forced to learn low-noise denoising that actually drives sample quality.
+        # weight_t = min(SNR_t, γ) / SNR_t  (Hang et al. 2023, γ=5 is standard)
+        snr_t = self.snr[t]                                              # [B]
+        weight = (snr_t.clamp(max=self.config.min_snr_gamma) / snr_t).detach()
+        loss_per_sample = F.mse_loss(eps_pred, eps, reduction='none').mean(dim=[1, 2, 3])
+        loss = (loss_per_sample * weight).mean()
         loss.backward()
         grad_norm = clip_grad_norm_(self.model.parameters(), self.config.max_grad_norm).item()
         self.optimizer.step()
@@ -155,7 +164,10 @@ class DiffusionTrainer(BaseTrainer):
             sqrt_1ma = self.sqrt_one_minus_alphas_cumprod[t][:, None, None, None]
             x_t = sqrt_a * x0 + sqrt_1ma * eps
             eps_pred = self.model(x_t, t, z)
-            total += F.mse_loss(eps_pred, eps).item() * B
+            snr_t = self.snr[t]
+            weight = (snr_t.clamp(max=self.config.min_snr_gamma) / snr_t).detach()
+            loss_per_sample = F.mse_loss(eps_pred, eps, reduction='none').mean(dim=[1, 2, 3])
+            total += ((loss_per_sample * weight).sum()).item()
             n += B
         self.model.train()
         return total / n
