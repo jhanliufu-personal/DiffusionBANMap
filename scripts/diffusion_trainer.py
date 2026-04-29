@@ -6,7 +6,6 @@ Conditioning: β-VAE posterior mean μ, obtained by passing the clean image
 through a frozen encoder at every training step.
 """
 
-import math
 import time
 import torch
 import torch.nn.functional as F
@@ -17,19 +16,7 @@ from torch.utils.data import DataLoader
 
 from scripts.config import DiffusionConfig
 from scripts.base_trainer import BaseTrainer
-
-
-def _cosine_betas(num_timesteps: int, s: float = 0.008) -> torch.Tensor:
-    """Improved DDPM cosine noise schedule (Nichol & Dhariwal 2021)."""
-    t = torch.arange(num_timesteps + 1) / num_timesteps
-    f = torch.cos((t + s) / (1 + s) * math.pi / 2) ** 2
-    alphas_cumprod = f / f[0]
-    betas = 1 - alphas_cumprod[1:] / alphas_cumprod[:-1]
-    return betas.clamp(max=0.999)
-
-
-def _linear_betas(num_timesteps: int) -> torch.Tensor:
-    return torch.linspace(1e-4, 0.02, num_timesteps)
+from utils import _cosine_betas
 
 
 class DiffusionTrainer(BaseTrainer):
@@ -59,7 +46,7 @@ class DiffusionTrainer(BaseTrainer):
         if config.beta_schedule == 'cosine':
             betas = _cosine_betas(T)
         elif config.beta_schedule == 'linear':
-            betas = _linear_betas(T)
+            betas = torch.linspace(1e-4, 0.02, T)
         else:
             raise ValueError(f"Unknown beta_schedule: {config.beta_schedule}")
 

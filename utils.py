@@ -3,9 +3,10 @@ Utility functions for β-VAE training and evaluation.
 Implements the exact loss function from Higgins et al. (2017) and training utilities.
 """
 
+import math
 import torch
 import torch.nn.functional as F
-from typing import Tuple, Dict, Any, Literal
+from typing import Tuple, Dict, Any, Literal, Optional, List
 import numpy as np
 from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
@@ -394,3 +395,153 @@ def create_training_config(dataset_name: str = 'faces') -> Dict[str, Any]:
         }
     
     return config
+
+
+# ── Diffusion noise schedule & sampling ───────────────────────────────────────
+
+def _cosine_betas(num_timesteps: int, s: float = 0.008) -> torch.Tensor:
+    """Cosine noise schedule (Nichol & Dhariwal 2021)."""
+    steps = torch.arange(num_timesteps + 1) / num_timesteps
+    f = torch.cos((steps + s) / (1 + s) * math.pi / 2) ** 2
+    acp = f / f[0]
+    return (1 - acp[1:] / acp[:-1]).clamp(max=0.999)
+
+
+def make_noise_schedule(diff_config, device: torch.device) -> Dict[str, torch.Tensor]:
+    """
+    Precompute all noise schedule tensors needed for diffusion training and inference.
+    Returns a dict of [T]-shaped tensors on the given device.
+    """
+    T = diff_config.num_timesteps
+    if diff_config.beta_schedule == 'cosine':
+        betas = _cosine_betas(T).to(device)
+    elif diff_config.beta_schedule == 'linear':
+        betas = torch.linspace(1e-4, 0.02, T, device=device)
+    else:
+        raise ValueError(f"Unknown beta_schedule: {diff_config.beta_schedule}")
+
+    alphas = 1.0 - betas
+    alphas_cumprod = torch.cumprod(alphas, dim=0)
+    alphas_cumprod_prev = torch.cat([torch.ones(1, device=device), alphas_cumprod[:-1]])
+
+    return {
+        'betas':                     betas,
+        'alphas':                    alphas,
+        'alphas_cumprod':            alphas_cumprod,
+        'alphas_cumprod_prev':       alphas_cumprod_prev,
+        'sqrt_alphas_cumprod':       alphas_cumprod.sqrt(),
+        'sqrt_one_minus_alphas_cumprod': (1.0 - alphas_cumprod).sqrt(),
+        'posterior_var':             betas * (1.0 - alphas_cumprod_prev) / (1.0 - alphas_cumprod),
+        'snr':                       alphas_cumprod / (1.0 - alphas_cumprod),
+    }
+
+
+@torch.no_grad()
+def diffusion_sample(
+    z: torch.Tensor,
+    unet: torch.nn.Module,
+    schedule: Dict[str, torch.Tensor],
+    diff_config,
+    device: torch.device,
+    sampler: str = 'ddpm',
+    eta: float = 0.0,
+    num_inference_steps: Optional[int] = None,
+    guidance_scale: float = 1.0,
+    verbose: bool = False,
+    n_snapshots: int = 10,
+):
+    """
+    Generate images conditioned on beta-VAE latents z [B, latent_dim].
+
+    sampler='ddpm' : stochastic DDPM reverse process, always uses all T steps.
+    sampler='ddim' : DDIM (Song et al. 2020).
+        eta=0.0  → fully deterministic; same seed = same output every run.
+        eta=1.0  → stochasticity matching DDPM posterior variance.
+        num_inference_steps < T → accelerated sampling (e.g. 50 steps instead of 1000).
+
+    guidance_scale > 1 applies classifier-free guidance (requires CFG-trained model).
+
+    verbose=True: returns (image, snapshots) where snapshots is a list of
+    (t, cpu_tensor [B,C,H,W]) captured at n_snapshots evenly-spaced steps,
+    ordered noisy → clean.
+    """
+    T   = diff_config.num_timesteps
+    B   = z.shape[0]
+    C, H, W = diff_config.in_channels, diff_config.image_size, diff_config.image_size
+
+    acp      = schedule['alphas_cumprod']
+    alphas   = schedule['alphas']
+    betas    = schedule['betas']
+    sqrt_acp = schedule['sqrt_alphas_cumprod']
+    sqrt_omacp = schedule['sqrt_one_minus_alphas_cumprod']
+    post_var = schedule['posterior_var']
+
+    # ── Build ordered timestep list (high t → low t) ──────────────────────────
+    if sampler == 'ddim':
+        n_steps = num_inference_steps or T
+        # Uniformly space n_steps indices across [T-1, 0]
+        timesteps = torch.linspace(T - 1, 0, n_steps).round().long().tolist()
+    else:
+        timesteps = list(range(T - 1, -1, -1))
+
+    # ── Snapshot bookkeeping ──────────────────────────────────────────────────
+    if verbose:
+        stride = max(1, len(timesteps) // n_snapshots)
+        capture_at = set(range(0, len(timesteps), stride))
+        capture_at.add(len(timesteps) - 1)
+        snapshots: List[Tuple[int, torch.Tensor]] = []
+
+    x      = torch.randn(B, C, H, W, device=device)
+    z_null = torch.zeros_like(z)
+
+    for i, t_idx in enumerate(timesteps):
+        if verbose and i in capture_at:
+            snapshots.append((t_idx, torch.sigmoid(x.clone()).cpu()))
+
+        t_batch = torch.full((B,), t_idx, device=device, dtype=torch.long)
+
+        # ── Noise prediction (with optional CFG) ──────────────────────────────
+        if guidance_scale != 1.0:
+            eps_both = unet(
+                torch.cat([x, x]),
+                torch.cat([t_batch, t_batch]),
+                torch.cat([z, z_null]),
+            )
+            eps_cond, eps_uncond = eps_both.chunk(2)
+            eps_pred = eps_uncond + guidance_scale * (eps_cond - eps_uncond)
+        else:
+            eps_pred = unet(x, t_batch, z)
+
+        # ── Predict x_0 ───────────────────────────────────────────────────────
+        pred_x0 = (x - sqrt_omacp[t_idx] * eps_pred) / sqrt_acp[t_idx]
+        pred_x0 = pred_x0.clamp(-1.0, 1.0)
+
+        # ── Reverse step ──────────────────────────────────────────────────────
+        if sampler == 'ddpm':
+            acp_prev_t = schedule['alphas_cumprod_prev'][t_idx]
+            coef1 = acp_prev_t.sqrt() * betas[t_idx] / (1.0 - acp[t_idx])
+            coef2 = alphas[t_idx].sqrt() * (1.0 - acp_prev_t) / (1.0 - acp[t_idx])
+            mean  = coef1 * pred_x0 + coef2 * x
+            x = mean + (post_var[t_idx].sqrt() * torch.randn_like(x) if t_idx > 0 else 0)
+
+        else:  # ddim
+            t_prev = timesteps[i + 1] if i + 1 < len(timesteps) else None
+            acp_t      = acp[t_idx]
+            acp_t_prev = acp[t_prev] if t_prev is not None else torch.ones(1, device=device).squeeze()
+
+            # σ_t interpolates between deterministic (η=0) and stochastic (η=1)
+            sigma = eta * (
+                ((1 - acp_t_prev) / (1 - acp_t)).sqrt()
+                * (1 - acp_t / acp_t_prev).clamp(min=0).sqrt()
+            )
+            dir_xt = (1 - acp_t_prev - sigma ** 2).clamp(min=0).sqrt() * eps_pred
+            noise  = sigma * torch.randn_like(x) if (t_prev is not None and eta > 0) else 0
+            x = acp_t_prev.sqrt() * pred_x0 + dir_xt + noise
+
+    final = torch.sigmoid(x)
+    if verbose:
+        snapshots.append((0, final.cpu()))
+        seen: set = set()
+        snapshots = [(t, img) for t, img in snapshots if not (t in seen or seen.add(t))]
+        return final, snapshots
+    return final
