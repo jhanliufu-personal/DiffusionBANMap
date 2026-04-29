@@ -62,6 +62,7 @@ class DiffusionConfig:
     num_timesteps: int
     beta_schedule: str      # 'linear' or 'cosine'
     min_snr_gamma: float    # Min-SNR-γ loss weighting (Hang et al. 2023); 5.0 is standard
+    cfg_uncond_prob: float  # CFG conditioning dropout probability; 0.0 = disabled, 0.15 = standard
 
     # Optimizer
     lr: float

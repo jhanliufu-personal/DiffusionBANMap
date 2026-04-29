@@ -122,8 +122,14 @@ class DiffusionTrainer(BaseTrainer):
         with torch.no_grad():
             z, _ = self.vae_model.encode(x0)   # mu, logvar
 
-        # Sample t and noise
+        # CFG conditioning dropout: zero out z for a random subset of samples so the
+        # model learns unconditional generation alongside conditional. z=0 is the null token.
         B = x0.shape[0]
+        if self.config.cfg_uncond_prob > 0.0:
+            null_mask = torch.rand(B, device=self.device) < self.config.cfg_uncond_prob
+            z = z.masked_fill(null_mask.unsqueeze(1), 0.0)
+
+        # Sample t and noise
         t = torch.randint(0, self.config.num_timesteps, (B,), device=self.device)
         eps = torch.randn_like(x0)
 
