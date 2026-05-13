@@ -15,8 +15,10 @@ fails due to Google Drive quota limits, download manually:
   3. Extract so that images are at <data_dir>/celeba/img_align_celeba/*.jpg
 """
 
-import argparse
 import os
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")  # suppress Windows OpenMP conflict
+
+import argparse
 import sys
 
 
