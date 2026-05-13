@@ -20,7 +20,7 @@ def make_run_tag(cfg) -> str:
                 f"_z{cfg.latent_dim}_hd{cfg.hidden_dim}")
     else:  # Diffusion
         ch = 'x'.join(str(c) for c in cfg.channel_mult)
-        return f"h{cfg.image_size}_mc{cfg.model_channels}_ch{ch}_T{cfg.num_timesteps}_{cfg.beta_schedule}"
+        return f"h{cfg.image_size}_mc{cfg.model_channels}_ch{ch}_T{cfg.num_timesteps}_{cfg.beta_schedule}_z{cfg.latent_dim}"
 
 
 def discover_device() -> Literal["cuda", "mps", "cpu"]:
