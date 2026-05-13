@@ -34,6 +34,7 @@ class DiffusionTrainer(BaseTrainer):
         super().__init__(model, optimizer, scheduler, config, device)
         self.train_dataloader = train_dataloader
         self.val_dataloader = val_dataloader
+        self.best_val_loss = float("inf")
 
         # Frozen beta-VAE encoder — never updated
         self.vae_model = vae_model.to(device).eval()
@@ -93,9 +94,11 @@ class DiffusionTrainer(BaseTrainer):
             if self.val_dataloader is not None and not self.step % self.config.eval_interval:
                 val_loss = self._evaluate()
                 wandb.log({"val/loss": val_loss}, step=self.step)
-
-            if not self.step % self.config.ckpt_interval:
-                self._save_checkpoint(elapsed)
+                if val_loss < self.best_val_loss:
+                    self.best_val_loss = val_loss
+                    self._save_checkpoint(elapsed)
+                    wandb.log({"val/best_loss": self.best_val_loss}, step=self.step)
+                    print(f"  ↓ best val_loss={self.best_val_loss:.4f} → saved best_ckpt.pt")
 
             self.step += 1
 

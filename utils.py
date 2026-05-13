@@ -13,6 +13,16 @@ import matplotlib.pyplot as plt
 from torchvision.utils import make_grid
 
 
+def make_run_tag(cfg) -> str:
+    """Short hyperparam summary appended to output_dir to uniquely identify a run."""
+    if hasattr(cfg, 'hidden_dim'):  # BetaVAE
+        return (f"b{cfg.beta:g}_h{cfg.input_height}x{cfg.input_width}"
+                f"_z{cfg.latent_dim}_hd{cfg.hidden_dim}")
+    else:  # Diffusion
+        ch = 'x'.join(str(c) for c in cfg.channel_mult)
+        return f"h{cfg.image_size}_mc{cfg.model_channels}_ch{ch}_T{cfg.num_timesteps}_{cfg.beta_schedule}"
+
+
 def discover_device() -> Literal["cuda", "mps", "cpu"]:
     if torch.cuda.is_available():
         device = "cuda"

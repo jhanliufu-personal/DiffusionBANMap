@@ -24,6 +24,7 @@ class BetaVAETrainer(BaseTrainer):
         super().__init__(model, optimizer, scheduler, config, device)
         self.train_dataloader = train_dataloader
         self.val_dataloader = val_dataloader
+        self.best_val_loss = float("inf")
         self.start_time = None
 
     def train(self, resume_ckpt_path: Optional[str] = None):
@@ -58,9 +59,11 @@ class BetaVAETrainer(BaseTrainer):
                     "val/recon_loss": val_metrics['reconstruction_loss'],
                     "val/beta_kl_loss": val_metrics['beta_weighted_kl'],
                 }, step=self.step)
-
-            if not self.step % self.config.ckpt_interval:
-                self._save_checkpoint(elapsed_time)
+                if val_metrics['total_loss'] < self.best_val_loss:
+                    self.best_val_loss = val_metrics['total_loss']
+                    self._save_checkpoint(elapsed_time)
+                    wandb.log({"val/best_loss": self.best_val_loss}, step=self.step)
+                    print(f"  ↓ best val_loss={self.best_val_loss:.4f} → saved best_ckpt.pt")
 
             self.step += 1
 

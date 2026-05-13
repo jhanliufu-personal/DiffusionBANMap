@@ -25,7 +25,7 @@ class BaseTrainer:
 
         print(f"Trainer initialized. Output directory: {config.output_dir}")
 
-    def _save_checkpoint(self, elapsed_time: float, extra: dict = {}):
+    def _save_checkpoint(self, elapsed_time: float, extra: dict = {}, filename: str = "best_ckpt.pt"):
         ckpt = {
             "step": self.step,
             "model_state_dict": self.model.state_dict(),
@@ -35,10 +35,7 @@ class BaseTrainer:
         }
         if self.scheduler is not None:
             ckpt["scheduler_state_dict"] = self.scheduler.state_dict()
-        path = os.path.join(
-            self.ckpt_dir, f"{self.config.experiment_name}_step{self.step}.pt"
-        )
-        torch.save(ckpt, path)
+        torch.save(ckpt, os.path.join(self.ckpt_dir, filename))
 
     def _load_checkpoint(self, path: str) -> float:
         """Load checkpoint state; returns elapsed_time offset."""

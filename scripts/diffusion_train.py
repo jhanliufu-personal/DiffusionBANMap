@@ -9,7 +9,7 @@ from data_utils import build_dataloaders
 from models.beta_vae import BetaVAE
 from models.unet import UNet
 from scripts.diffusion_trainer import DiffusionTrainer
-from utils import discover_device, count_model_params
+from utils import discover_device, count_model_params, make_run_tag
 
 
 def _load_frozen_vae(cfg, device: torch.device) -> BetaVAE:
@@ -40,6 +40,7 @@ if __name__ == "__main__":
     with open(args.config) as f:
         cfg = types.SimpleNamespace(**yaml.safe_load(f))
 
+    cfg.output_dir = f"{cfg.output_dir}_{make_run_tag(cfg)}"
     device = torch.device(discover_device())
 
     vae = _load_frozen_vae(cfg, device)

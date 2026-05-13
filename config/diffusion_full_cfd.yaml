@@ -18,8 +18,8 @@ attention_resolutions: [16]
 dropout: 0.1
 
 # Conditioning (frozen beta-VAE)
-betavae_config_path: outputs/betavae_full_cfd/config.json
-betavae_ckpt_path: outputs/betavae_full_cfd/checkpoints/betavae_full_cfd_step200.pt
+betavae_config_path: outputs/betavae_full_cfd_b4_h64x64_z10_hd128/config.json
+betavae_ckpt_path: outputs/betavae_full_cfd_b4_h64x64_z10_hd128/checkpoints/best_ckpt.pt
 latent_dim: 10
 
 # Diffusion
@@ -37,4 +37,3 @@ max_grad_norm: 1.0
 num_steps: 100000
 log_interval: 50
 eval_interval: 100
-ckpt_interval: 1000
