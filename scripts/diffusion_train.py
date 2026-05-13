@@ -1,23 +1,20 @@
-import json
-import wandb
-import torch
 import argparse
-import pickle as pkl
-from dataclasses import asdict
-from typing import Optional, Tuple
-from torch.utils.data import DataLoader
+import types
 
-from data_utils import PreloadedDataset
+import wandb
+import yaml
+import torch
+
+from data_utils import build_face_dataloaders
 from models.beta_vae import BetaVAE
 from models.unet import UNet
-from scripts.config import BetaVAEConfig, DiffusionConfig
 from scripts.diffusion_trainer import DiffusionTrainer
 from utils import discover_device, count_model_params
 
 
-def _load_frozen_vae(config: DiffusionConfig, device: torch.device) -> BetaVAE:
-    with open(config.betavae_config_path) as f:
-        vae_cfg = BetaVAEConfig(**json.load(f))
+def _load_frozen_vae(cfg, device: torch.device) -> BetaVAE:
+    with open(cfg.betavae_config_path) as f:
+        vae_cfg = types.SimpleNamespace(**yaml.safe_load(f))
     vae = BetaVAE(
         input_channels=vae_cfg.input_channels,
         input_height=vae_cfg.input_height,
@@ -27,30 +24,11 @@ def _load_frozen_vae(config: DiffusionConfig, device: torch.device) -> BetaVAE:
         beta=vae_cfg.beta,
         device=device,
     )
-    ckpt = torch.load(config.betavae_ckpt_path, map_location=device)
+    ckpt = torch.load(cfg.betavae_ckpt_path, map_location=device)
     vae.load_state_dict(ckpt["model_state_dict"])
     vae.eval()
-    print(f"Loaded frozen β-VAE from {config.betavae_ckpt_path} (step {ckpt['step']})")
+    print(f"Loaded frozen β-VAE from {cfg.betavae_ckpt_path} (step {ckpt['step']})")
     return vae
-
-
-def _setup_data_loaders(
-    train_path: Optional[str],
-    val_path: Optional[str],
-    batch_size: int,
-) -> Tuple[Optional[DataLoader], Optional[DataLoader]]:
-
-    def make_loader(path: Optional[str], shuffle: bool) -> Optional[DataLoader]:
-        if not path:
-            return None
-        with open(path, 'rb') as f:
-            tensor = pkl.load(f)
-        dataset = PreloadedDataset(tensor)
-        loader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=4)
-        print(f"{path}: {len(dataset)} images, {len(loader)} batches/step-cycle")
-        return loader
-
-    return make_loader(train_path, shuffle=True), make_loader(val_path, shuffle=False)
 
 
 if __name__ == "__main__":
@@ -60,35 +38,35 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     with open(args.config) as f:
-        config = DiffusionConfig(**json.load(f))
+        cfg = types.SimpleNamespace(**yaml.safe_load(f))
 
     device = torch.device(discover_device())
 
-    vae = _load_frozen_vae(config, device)
+    vae = _load_frozen_vae(cfg, device)
 
     model = UNet(
-        in_channels=config.in_channels,
-        image_size=config.image_size,
-        model_channels=config.model_channels,
-        channel_mult=config.channel_mult,
-        num_res_blocks=config.num_res_blocks,
-        attention_resolutions=config.attention_resolutions,
-        dropout=config.dropout,
-        latent_dim=config.latent_dim,
+        in_channels=cfg.in_channels,
+        image_size=cfg.image_size,
+        model_channels=cfg.model_channels,
+        channel_mult=cfg.channel_mult,
+        num_res_blocks=cfg.num_res_blocks,
+        attention_resolutions=cfg.attention_resolutions,
+        dropout=cfg.dropout,
+        latent_dim=cfg.latent_dim,
     )
     count_model_params(model)
 
-    train_loader, val_loader = _setup_data_loaders(
-        config.train_dataset_path, config.test_dataset_path, config.batch_size
+    train_loader, val_loader = build_face_dataloaders(
+        cfd_dir=cfg.cfd_dir,
+        expressions=cfg.expressions,
+        image_size=(cfg.image_size, cfg.image_size),
+        train_split=cfg.train_split,
+        batch_size=cfg.batch_size,
     )
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
 
-    wandb.init(
-        project="diffusion_ban_map",
-        name=f"{config.experiment_name}_run1",
-        config=asdict(config),
-    )
+    wandb.init(project="diffusion_ban_map", name=cfg.experiment_name, config=vars(cfg))
 
     trainer = DiffusionTrainer(
         model=model,
@@ -97,7 +75,7 @@ if __name__ == "__main__":
         scheduler=None,
         train_dataloader=train_loader,
         val_dataloader=val_loader,
-        config=config,
+        config=cfg,
         device=device,
     )
     trainer.train(resume_ckpt_path=args.resume)

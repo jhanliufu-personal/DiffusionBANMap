@@ -1,0 +1,39 @@
+experiment_name: diffusion_full_cfd
+output_dir: outputs/diffusion_full_cfd
+
+# Data
+cfd_dir: /home/jhanliufu/RutishauserLab/DATA/cfd/cfd/CFD Version 3.0/Images/CFD
+expressions: [N, A, F, HC, HO]
+train_split: 0.8
+batch_size: 32
+
+# UNet
+in_channels: 3
+image_size: 64
+model_channels: 64
+channel_mult: [1, 2, 4]
+num_res_blocks: 2
+attention_resolutions: [16]
+dropout: 0.1
+
+# Conditioning (frozen beta-VAE)
+betavae_config_path: outputs/betavae_full_cfd/config.json
+betavae_ckpt_path: outputs/betavae_full_cfd/checkpoints/betavae_full_cfd_step200.pt
+latent_dim: 10
+
+# Diffusion
+num_timesteps: 1000
+beta_schedule: cosine
+min_snr_gamma: 5.0
+cfg_uncond_prob: 0.0
+
+# Optimizer
+lr: 2.0e-4
+weight_decay: 0.0
+max_grad_norm: 1.0
+
+# Training
+num_steps: 100000
+log_interval: 50
+eval_interval: 100
+ckpt_interval: 1000

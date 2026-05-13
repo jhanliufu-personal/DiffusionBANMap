@@ -1,7 +1,6 @@
 import os
 import json
 import torch
-from dataclasses import asdict
 from typing import Optional
 
 
@@ -22,7 +21,7 @@ class BaseTrainer:
         os.makedirs(self.vis_dir, exist_ok=True)
 
         with open(os.path.join(config.output_dir, 'config.json'), 'w') as f:
-            json.dump(asdict(config), f, indent=2)
+            json.dump(vars(config), f, indent=2)
 
         print(f"Trainer initialized. Output directory: {config.output_dir}")
 

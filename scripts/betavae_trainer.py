@@ -6,7 +6,6 @@ from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
 
 from utils import beta_vae_loss
-from scripts.config import BetaVAEConfig
 from scripts.base_trainer import BaseTrainer
 
 
@@ -19,7 +18,7 @@ class BetaVAETrainer(BaseTrainer):
         scheduler: Optional[torch.optim.lr_scheduler.LRScheduler],
         train_dataloader: Optional[DataLoader],
         val_dataloader: Optional[DataLoader],
-        config: BetaVAEConfig,
+        config,
         device: torch.device,
     ):
         super().__init__(model, optimizer, scheduler, config, device)
