@@ -4,7 +4,7 @@ output_dir: outputs/betavae_full_celeba
 # Data — run scripts/download_celeba_dataset.py first, then set data_dir to the
 # img_align_celeba folder it prints. 256x256 matches DDPM paper (Ho et al. 2020).
 dataset_type: celeba
-data_dir: /path/to/celeba/img_align_celeba
+data_dir: data/celeba/img_align_celeba
 train_split: 0.9
 batch_size: 16
 
