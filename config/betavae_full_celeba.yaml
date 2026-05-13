@@ -1,0 +1,29 @@
+experiment_name: betavae_full_celeba
+output_dir: outputs/betavae_full_celeba
+
+# Data — run scripts/download_celeba_dataset.py first, then set data_dir to the
+# img_align_celeba folder it prints. 256x256 matches DDPM paper (Ho et al. 2020).
+dataset_type: celeba
+data_dir: /path/to/celeba/img_align_celeba
+train_split: 0.9
+batch_size: 16
+
+# Model — 4 stride-2 convs give flattened_size = 64×16×16 = 16384 at 256×256;
+# hidden_dim bridges that to latent_dim.
+input_channels: 3
+input_height: 256
+input_width: 256
+latent_dim: 128
+hidden_dim: 1024
+beta: 4.0
+
+# Optimizer
+lr: 1.0e-4
+weight_decay: 1.0e-5
+max_grad_norm: 1.0
+
+# Training
+num_epochs: 50
+log_interval: 1
+eval_interval: 5
+ckpt_interval: 10

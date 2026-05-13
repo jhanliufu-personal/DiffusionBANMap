@@ -5,7 +5,7 @@ import wandb
 import yaml
 import torch
 
-from data_utils import build_face_dataloaders
+from data_utils import build_dataloaders
 from models.beta_vae import BetaVAE
 from models.unet import UNet
 from scripts.diffusion_trainer import DiffusionTrainer
@@ -56,13 +56,7 @@ if __name__ == "__main__":
     )
     count_model_params(model)
 
-    train_loader, val_loader = build_face_dataloaders(
-        cfd_dir=cfg.cfd_dir,
-        expressions=cfg.expressions,
-        image_size=(cfg.image_size, cfg.image_size),
-        train_split=cfg.train_split,
-        batch_size=cfg.batch_size,
-    )
+    train_loader, val_loader = build_dataloaders(cfg)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
 
