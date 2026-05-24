@@ -480,7 +480,7 @@ def visualize_unet_one_step(
     x0 = x0[:n]
     z  = z[:n]
 
-    sqrt_a_all   = schedule['sqrt_alphas_cumprod']
+    sqrt_a_all = schedule['sqrt_alphas_cumprod']
     sqrt_1ma_all = schedule['sqrt_one_minus_alphas_cumprod']
 
     t_vals = [num_timesteps // 8, num_timesteps // 2, num_timesteps * 7 // 8]
@@ -505,12 +505,12 @@ def visualize_unet_one_step(
 
     for ti, t_val in enumerate(t_vals):
         t_tensor = torch.full((n,), t_val, device=device, dtype=torch.long)
-        eps      = torch.randn_like(x0)
-        sqrt_a   = sqrt_a_all[t_tensor][:, None, None, None]
+        eps = torch.randn_like(x0)
+        sqrt_a = sqrt_a_all[t_tensor][:, None, None, None]
         sqrt_1ma = sqrt_1ma_all[t_tensor][:, None, None, None]
-        x_t      = sqrt_a * x0 + sqrt_1ma * eps
+        x_t = sqrt_a * x0 + sqrt_1ma * eps
         eps_pred = model(x_t, t_tensor, z)
-        x_pred   = (x_t - sqrt_1ma * eps_pred) / sqrt_a
+        x_pred = (x_t - sqrt_1ma * eps_pred) / sqrt_a
 
         row_xt = 1 + 2 * ti
         row_xp = row_xt + 1
