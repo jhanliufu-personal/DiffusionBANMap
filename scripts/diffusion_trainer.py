@@ -12,14 +12,13 @@ import torch
 import torch.nn.functional as F
 import matplotlib
 matplotlib.use('Agg')
-import matplotlib.pyplot as plt
 import wandb
 from typing import Optional
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
 
 from scripts.base_trainer import BaseTrainer
-from utils import _cosine_betas
+from utils import _cosine_betas, visualize_unet_one_step
 
 
 class DiffusionTrainer(BaseTrainer):
@@ -186,64 +185,20 @@ class DiffusionTrainer(BaseTrainer):
 
     @torch.no_grad()
     def _visualize(self, step: int):
-        """Save a diagnostic figure: x0 / x_t / x_pred at three noise levels."""
         self.model.eval()
-
         batch = next(iter(self.val_dataloader))
         n = min(8, batch.shape[0])
         x0 = batch[:n].to(self.device)
-
         if self.unconditional:
             z = torch.zeros(n, self.config.latent_dim, device=self.device)
         else:
             z, _ = self.vae_model.encode(x0)
-
-        T = self.config.num_timesteps
-        t_vals = [T // 8, T // 2, T * 7 // 8]
-
-        # Layout: row 0 = x0; then (x_t, x_pred) pairs for each noise level
-        n_rows = 1 + 2 * len(t_vals)
-        fig, axes = plt.subplots(n_rows, n, figsize=(n * 2, n_rows * 2), squeeze=False)
-
-        def _show(ax, img_tensor):
-            img = img_tensor.cpu().permute(1, 2, 0).numpy().clip(0, 1)
-            if img.shape[-1] == 1:
-                ax.imshow(img.squeeze(-1), cmap='gray', vmin=0, vmax=1)
-            else:
-                ax.imshow(img)
-            ax.axis('off')
-
-        row_labels = ['x0']
-        for t in t_vals:
-            row_labels += [f'x_t  t={t}', f'x_pred  t={t}']
-
-        for col in range(n):
-            _show(axes[0, col], x0[col])
-
-        for ti, t_val in enumerate(t_vals):
-            t_tensor = torch.full((n,), t_val, device=self.device, dtype=torch.long)
-            eps = torch.randn_like(x0)
-            sqrt_a   = self.sqrt_alphas_cumprod[t_tensor][:, None, None, None]
-            sqrt_1ma = self.sqrt_one_minus_alphas_cumprod[t_tensor][:, None, None, None]
-            x_t      = sqrt_a * x0 + sqrt_1ma * eps
-            eps_pred = self.model(x_t, t_tensor, z)
-            x_pred   = (x_t - sqrt_1ma * eps_pred) / sqrt_a
-
-            row_xt = 1 + 2 * ti
-            row_xp = row_xt + 1
-            for col in range(n):
-                _show(axes[row_xt, col], x_t[col].clamp(0, 1))
-                _show(axes[row_xp, col], x_pred[col].clamp(0, 1))
-
-        for row, label in enumerate(row_labels):
-            axes[row, 0].set_ylabel(label, fontsize=7, rotation=0,
-                                    ha='right', va='center', labelpad=55)
-
-        fig.suptitle(f'Step {step}', fontsize=9)
-        plt.tight_layout()
-
+        schedule = {
+            'sqrt_alphas_cumprod':           self.sqrt_alphas_cumprod,
+            'sqrt_one_minus_alphas_cumprod': self.sqrt_one_minus_alphas_cumprod,
+        }
         path = os.path.join(self.vis_dir, f'step_{step:07d}.png')
-        fig.savefig(path, dpi=80, bbox_inches='tight')
-        plt.close(fig)
+        visualize_unet_one_step(self.model, x0, z, schedule, self.config.num_timesteps,
+                                self.device, save_path=path, title=f'Step {step}')
         self.model.train()
         print(f"  Saved visualization → {path}")

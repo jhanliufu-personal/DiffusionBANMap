@@ -447,6 +447,93 @@ def make_noise_schedule(diff_config, device: torch.device) -> Dict[str, torch.Te
 
 
 @torch.no_grad()
+def visualize_unet_one_step(
+    model: torch.nn.Module,
+    x0: torch.Tensor,
+    z: torch.Tensor,
+    schedule: Dict[str, torch.Tensor],
+    num_timesteps: int,
+    device: torch.device,
+    save_path: Optional[str] = None,
+    title: Optional[str] = None,
+) -> None:
+    """
+    One-step reconstruction diagnostic.
+
+    Shows x0, x_t, and x_pred = (x_t - sqrt(1-ᾱ_t)·ε_pred) / sqrt(ᾱ_t) at three
+    noise levels (T/8, T/2, 7T/8) for up to 8 images.  If save_path is given the
+    figure is saved and closed; otherwise plt.show() is called.
+
+    Args:
+        model:          UNet (set to eval before calling if needed).
+        x0:             Clean images [B, C, H, W] in [0, 1], on device.
+        z:              Conditioning latents [B, latent_dim]; pass zeros for unconditional.
+        schedule:       Dict from make_noise_schedule — needs sqrt_alphas_cumprod and
+                        sqrt_one_minus_alphas_cumprod.
+        num_timesteps:  T (length of the noise schedule).
+        device:         Torch device.
+        save_path:      Where to write the PNG (None → display inline).
+        title:          Optional figure suptitle (e.g. "Step 1000").
+    """
+    model.eval()
+    n = min(8, x0.shape[0])
+    x0 = x0[:n]
+    z  = z[:n]
+
+    sqrt_a_all   = schedule['sqrt_alphas_cumprod']
+    sqrt_1ma_all = schedule['sqrt_one_minus_alphas_cumprod']
+
+    t_vals = [num_timesteps // 8, num_timesteps // 2, num_timesteps * 7 // 8]
+    n_rows = 1 + 2 * len(t_vals)
+
+    fig, axes = plt.subplots(n_rows, n, figsize=(n * 2, n_rows * 2), squeeze=False)
+
+    def _show(ax, img_tensor):
+        img = img_tensor.cpu().permute(1, 2, 0).float().numpy().clip(0, 1)
+        if img.shape[-1] == 1:
+            ax.imshow(img.squeeze(-1), cmap='gray', vmin=0, vmax=1)
+        else:
+            ax.imshow(img)
+        ax.axis('off')
+
+    row_labels = ['x0']
+    for t in t_vals:
+        row_labels += [f'x_t  t={t}', f'x_pred  t={t}']
+
+    for col in range(n):
+        _show(axes[0, col], x0[col])
+
+    for ti, t_val in enumerate(t_vals):
+        t_tensor = torch.full((n,), t_val, device=device, dtype=torch.long)
+        eps      = torch.randn_like(x0)
+        sqrt_a   = sqrt_a_all[t_tensor][:, None, None, None]
+        sqrt_1ma = sqrt_1ma_all[t_tensor][:, None, None, None]
+        x_t      = sqrt_a * x0 + sqrt_1ma * eps
+        eps_pred = model(x_t, t_tensor, z)
+        x_pred   = (x_t - sqrt_1ma * eps_pred) / sqrt_a
+
+        row_xt = 1 + 2 * ti
+        row_xp = row_xt + 1
+        for col in range(n):
+            _show(axes[row_xt, col], x_t[col].clamp(0, 1))
+            _show(axes[row_xp, col], x_pred[col].clamp(0, 1))
+
+    for row, label in enumerate(row_labels):
+        axes[row, 0].set_ylabel(label, fontsize=7, rotation=0,
+                                ha='right', va='center', labelpad=55)
+
+    if title:
+        fig.suptitle(title, fontsize=9)
+    plt.tight_layout()
+
+    if save_path is not None:
+        fig.savefig(save_path, dpi=80, bbox_inches='tight')
+        plt.close(fig)
+    else:
+        plt.show()
+
+
+@torch.no_grad()
 def diffusion_sample(
     z: torch.Tensor,
     unet: torch.nn.Module,
