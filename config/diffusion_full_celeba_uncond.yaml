@@ -1,0 +1,39 @@
+experiment_name: diffusion_full_celeba_uncond
+output_dir: outputs/diffusion_full_celeba_uncond
+
+# Data
+dataset_type: celeba
+data_dir: /path/to/celeba/img_align_celeba
+train_split: 0.9
+batch_size: 32
+
+# UNet — wider and deeper than CFD to handle 256×256
+in_channels: 3
+image_size: 256
+model_channels: 128
+channel_mult: [1, 2, 2, 4]
+num_res_blocks: 2
+attention_resolutions: [32, 64]
+dropout: 0.1
+
+# Diffusion
+unconditional: true
+num_timesteps: 1000
+beta_schedule: cosine
+min_snr_gamma: 5.0
+cfg_uncond_prob: 0.0
+
+# # Conditioning (frozen β-VAE)
+# betavae_config_path: outputs/betavae_full_celeba_b4_h256x256_z128_hd1024/config.json
+# betavae_ckpt_path: outputs/betavae_full_celeba_b4_h256x256_z128_hd1024/checkpoints/best_ckpt.pt
+# latent_dim: 128
+
+# Optimizer
+lr: 1.0e-4
+weight_decay: 0.0
+max_grad_norm: 1.0
+
+# Training
+num_steps: 5000
+log_interval: 50
+eval_interval: 50
