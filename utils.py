@@ -506,7 +506,7 @@ def diffusion_sample(
 
     for i, t_idx in enumerate(timesteps):
         if verbose and i in capture_at:
-            snapshots.append((t_idx, torch.sigmoid(x.clone()).cpu()))
+            snapshots.append((t_idx, x.clone().clamp(0.0, 1.0).cpu()))
 
         t_batch = torch.full((B,), t_idx, device=device, dtype=torch.long)
 
@@ -524,7 +524,7 @@ def diffusion_sample(
 
         # ── Predict x_0 ───────────────────────────────────────────────────────
         pred_x0 = (x - sqrt_omacp[t_idx] * eps_pred) / sqrt_acp[t_idx]
-        pred_x0 = pred_x0.clamp(-1.0, 1.0)
+        pred_x0 = pred_x0.clamp(0.0, 1.0)
 
         # ── Reverse step ──────────────────────────────────────────────────────
         if sampler == 'ddpm':
@@ -548,7 +548,7 @@ def diffusion_sample(
             noise  = sigma * torch.randn_like(x) if (t_prev is not None and eta > 0) else 0
             x = acp_t_prev.sqrt() * pred_x0 + dir_xt + noise
 
-    final = torch.sigmoid(x)
+    final = x.clamp(0.0, 1.0)
     if verbose:
         snapshots.append((0, final.cpu()))
         seen: set = set()
