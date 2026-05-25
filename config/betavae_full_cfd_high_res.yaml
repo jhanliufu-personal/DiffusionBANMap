@@ -1,0 +1,27 @@
+experiment_name: betavae_full_cfd_high_res
+output_dir: outputs/betavae_full_cfd_high_res
+
+# Data
+dataset_type: cfd
+data_dir: data/cfd/cfd/CFD Version 3.0/Images/CFD
+expressions: [N, A, F, HC, HO]
+train_split: 0.8
+batch_size: 32
+
+# Model
+input_channels: 3
+input_height: 256
+input_width: 256
+latent_dim: 24
+hidden_dim: 128
+beta: 4.0
+
+# Optimizer
+lr: 1.0e-4
+weight_decay: 1.0e-5
+max_grad_norm: 3000.0
+
+# Training
+num_epochs: 200
+log_interval: 1
+eval_interval: 5
