@@ -1,0 +1,39 @@
+experiment_name: diffusion_full_cfd_flow
+output_dir: outputs/diffusion_full_cfd_flow
+
+# Data
+dataset_type: cfd
+data_dir: data/cfd/cfd/CFD Version 3.0/Images/CFD
+expressions: [N, A, F, HC, HO]
+train_split: 0.8
+batch_size: 32
+
+# UNet
+in_channels: 3
+image_size: 64
+model_channels: 64
+channel_mult: [1, 2, 4]
+num_res_blocks: 2
+attention_resolutions: [16]
+dropout: 0.1
+
+# Conditioning (frozen beta-VAE)
+unconditional: false
+betavae_config_path: outputs/betavae_full_cfd_b4_h64x64_z10_hd128/config.json
+betavae_ckpt_path: outputs/betavae_full_cfd_b4_h64x64_z10_hd128/checkpoints/best_ckpt.pt
+latent_dim: 10
+
+# Diffusion
+noise_process: flow
+num_timesteps: 1000
+cfg_uncond_prob: 0.0
+
+# Optimizer
+lr: 2.0e-4
+weight_decay: 0.0
+max_grad_norm: 1.0
+
+# Training
+num_steps: 100000
+log_interval: 50
+eval_interval: 100

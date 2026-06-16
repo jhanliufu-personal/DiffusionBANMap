@@ -1,5 +1,5 @@
-experiment_name: diffusion_full_cfd_high_res
-output_dir: outputs/diffusion_full_cfd_high_res
+experiment_name: diffusion_full_cfd_high_res_flow
+output_dir: outputs/diffusion_full_cfd_high_res_flow
 
 # Data
 dataset_type: cfd
@@ -18,6 +18,7 @@ attention_resolutions: [32, 64]
 dropout: 0.1
 
 # Conditioning (frozen beta-VAE)
+unconditional: false
 betavae_config_path: outputs/betavae_full_cfd_high_res_b4_h256x256_z24_hd128/config.json
 betavae_ckpt_path: outputs/betavae_full_cfd_high_res_b4_h256x256_z24_hd128/checkpoints/best_ckpt.pt
 latent_dim: 24
