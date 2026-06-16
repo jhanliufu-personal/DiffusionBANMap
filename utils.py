@@ -12,6 +12,8 @@ from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
 from torchvision.utils import make_grid
 
+from models.noise_process import _cosine_betas  # noqa: F401  (re-exported for callers)
+
 
 def make_run_tag(cfg) -> str:
     """Short hyperparam summary appended to output_dir to uniquely identify a run."""
@@ -20,7 +22,11 @@ def make_run_tag(cfg) -> str:
                 f"_z{cfg.latent_dim}_hd{cfg.hidden_dim}")
     else:  # Diffusion
         ch = 'x'.join(str(c) for c in cfg.channel_mult)
-        return f"h{cfg.image_size}_mc{cfg.model_channels}_ch{ch}_T{cfg.num_timesteps}_{cfg.beta_schedule}_z{cfg.latent_dim}"
+        np_type = getattr(cfg, 'noise_process', 'ddpm')
+        T = getattr(cfg, 'num_timesteps', 1000)
+        # For DDPM show the schedule; for continuous processes show the process name
+        sched = getattr(cfg, 'beta_schedule', np_type) if np_type == 'ddpm' else np_type
+        return f"h{cfg.image_size}_mc{cfg.model_channels}_ch{ch}_T{T}_{sched}_z{cfg.latent_dim}"
 
 
 def discover_device() -> Literal["cuda", "mps", "cpu"]:
@@ -409,14 +415,6 @@ def create_training_config(dataset_name: str = 'faces') -> Dict[str, Any]:
 
 # ── Diffusion noise schedule & sampling ───────────────────────────────────────
 
-def _cosine_betas(num_timesteps: int, s: float = 0.008) -> torch.Tensor:
-    """Cosine noise schedule (Nichol & Dhariwal 2021)."""
-    steps = torch.arange(num_timesteps + 1) / num_timesteps
-    f = torch.cos((steps + s) / (1 + s) * math.pi / 2) ** 2
-    acp = f / f[0]
-    return (1 - acp[1:] / acp[:-1]).clamp(max=0.999)
-
-
 def make_noise_schedule(diff_config, device: torch.device) -> Dict[str, torch.Tensor]:
     """
     Precompute all noise schedule tensors needed for diffusion training and inference.
@@ -640,5 +638,175 @@ def diffusion_sample(
         snapshots.append((0, final.cpu()))
         seen: set = set()
         snapshots = [(t, img) for t, img in snapshots if not (t in seen or seen.add(t))]
+        return final, snapshots
+    return final
+
+
+@torch.no_grad()
+def flow_sample(
+    z: torch.Tensor,
+    model: torch.nn.Module,
+    config,
+    device: torch.device,
+    num_steps: int = 100,
+    guidance_scale: float = 1.0,
+    verbose: bool = False,
+    n_snapshots: int = 10,
+):
+    """
+    Euler ODE sampler for rectified flow.
+
+    Integrates v_θ(x_t, t) from t=0 (noise) to t=1 (data) with uniform
+    step size Δt = 1/num_steps.
+
+    Args:
+        z:              β-VAE conditioning latents [B, latent_dim].
+        model:          Trained velocity network; called as model(x, t_embed, z).
+        config:         Config object; must have in_channels, image_size.
+                        num_timesteps is used as the sinusoidal embedding scale
+                        (default 1000 if absent).
+        device:         Target device.
+        num_steps:      Number of Euler steps (fewer → faster, lower quality).
+        guidance_scale: CFG scale; > 1 requires a CFG-trained model.
+        verbose:        If True, returns (image, snapshots) where snapshots is a
+                        list of (t_float, cpu_tensor [B,C,H,W]) at n_snapshots
+                        evenly-spaced steps.
+
+    Returns:
+        Generated images [B, C, H, W] in [0, 1], or (images, snapshots) if verbose.
+    """
+    B = z.shape[0]
+    C, H, W = config.in_channels, config.image_size, config.image_size
+    embed_scale = getattr(config, 'num_timesteps', 1000)
+    z_null = torch.zeros_like(z)
+
+    x = torch.randn(B, C, H, W, device=device)
+    dt = 1.0 / num_steps
+
+    if verbose:
+        stride = max(1, num_steps // n_snapshots)
+        capture_at = set(range(0, num_steps, stride))
+        capture_at.add(num_steps - 1)
+        snapshots: List[Tuple[float, torch.Tensor]] = []
+
+    for i in range(num_steps):
+        t_val = i * dt
+        t_batch = torch.full((B,), t_val, device=device)
+        t_embed = t_batch * embed_scale
+
+        if verbose and i in capture_at:
+            snapshots.append((t_val, x.clone().clamp(0.0, 1.0).cpu()))
+
+        if guidance_scale != 1.0:
+            v_both = model(
+                torch.cat([x, x]),
+                torch.cat([t_embed, t_embed]),
+                torch.cat([z, z_null]),
+            )
+            v_cond, v_uncond = v_both.chunk(2)
+            v = v_uncond + guidance_scale * (v_cond - v_uncond)
+        else:
+            v = model(x, t_embed, z)
+
+        x = x + v * dt
+
+    final = x.clamp(0.0, 1.0)
+    if verbose:
+        snapshots.append((1.0, final.cpu()))
+        seen_t: set = set()
+        snapshots = [(t, img) for t, img in snapshots if not (t in seen_t or seen_t.add(t))]
+        return final, snapshots
+    return final
+
+
+@torch.no_grad()
+def vpsde_sample(
+    z: torch.Tensor,
+    model: torch.nn.Module,
+    config,
+    device: torch.device,
+    num_steps: int = 1000,
+    guidance_scale: float = 1.0,
+    verbose: bool = False,
+    n_snapshots: int = 10,
+):
+    """
+    Euler-Maruyama reverse SDE sampler for VP SDE.
+
+    Integrates the reverse VP SDE from t=1 (prior) to t=0 (data):
+        dx = [½β(t)x + β(t)·score] dt + √β(t) dB̄_t
+    where score = -ε_θ / σ(t).
+
+    Args:
+        z:              β-VAE conditioning latents [B, latent_dim].
+        model:          Trained score network (ε-prediction); called as model(x, t_embed, z).
+        config:         Config object; must have in_channels, image_size.
+                        vpsde_beta_min / vpsde_beta_max override defaults (0.01 / 5.0).
+                        num_timesteps used as sinusoidal embedding scale (default 1000).
+        device:         Target device.
+        num_steps:      Number of EM steps.
+        guidance_scale: CFG scale; > 1 requires a CFG-trained model.
+        verbose:        If True, returns (image, snapshots).
+
+    Returns:
+        Generated images [B, C, H, W] in [0, 1], or (images, snapshots) if verbose.
+    """
+    from models.noise_process import VPSDE
+
+    beta_min    = getattr(config, 'vpsde_beta_min', 0.01)
+    beta_max    = getattr(config, 'vpsde_beta_max', 5.0)
+    embed_scale = getattr(config, 'num_timesteps', 1000)
+    vpsde = VPSDE(beta_min=beta_min, beta_max=beta_max)
+
+    B = z.shape[0]
+    C, H, W = config.in_channels, config.image_size, config.image_size
+    dt = 1.0 / num_steps
+    z_null = torch.zeros_like(z)
+
+    # Initialize from prior: x(1) ~ N(0, σ(1)² I)
+    t1 = torch.ones(B, device=device)
+    sigma1 = vpsde.sigma(t1)[:, None, None, None]
+    x = sigma1 * torch.randn(B, C, H, W, device=device)
+
+    timesteps = torch.linspace(1.0, dt, num_steps, device=device)
+
+    if verbose:
+        stride = max(1, num_steps // n_snapshots)
+        capture_at = set(range(0, num_steps, stride))
+        capture_at.add(num_steps - 1)
+        snapshots: List[Tuple[float, torch.Tensor]] = []
+
+    for i, t_val in enumerate(timesteps):
+        t_batch = torch.full((B,), t_val.item(), device=device)
+        t_embed = t_batch * embed_scale
+
+        if verbose and i in capture_at:
+            snapshots.append((t_val.item(), x.clone().clamp(0.0, 1.0).cpu()))
+
+        if guidance_scale != 1.0:
+            eps_both = model(
+                torch.cat([x, x]),
+                torch.cat([t_embed, t_embed]),
+                torch.cat([z, z_null]),
+            )
+            eps_cond, eps_uncond = eps_both.chunk(2)
+            eps_pred = eps_uncond + guidance_scale * (eps_cond - eps_uncond)
+        else:
+            eps_pred = model(x, t_embed, z)
+
+        sigma_t = vpsde.sigma(t_batch)[:, None, None, None]
+        beta_t  = vpsde.beta(t_batch)[:, None, None, None]
+        score   = -eps_pred / (sigma_t + 1e-8)
+
+        # Reverse-SDE drift: ½β·x + β·score
+        drift  = 0.5 * beta_t * x + beta_t * score
+        sde_noise = torch.randn_like(x)
+        x = x + drift * dt + beta_t.sqrt() * (dt ** 0.5) * sde_noise
+
+    final = x.clamp(0.0, 1.0)
+    if verbose:
+        snapshots.append((0.0, final.cpu()))
+        seen_t: set = set()
+        snapshots = [(t, img) for t, img in snapshots if not (t in seen_t or seen_t.add(t))]
         return final, snapshots
     return final

@@ -1,9 +1,19 @@
 """
-Trainer for the conditional pixel-space diffusion model.
+Trainer for conditional pixel-space diffusion models.
 
-Training objective: ε-prediction MSE (Ho et al. 2020).
-Conditioning: β-VAE posterior mean μ, obtained by passing the clean image
-through a frozen encoder at every training step.
+The noise process is selected via config.noise_process (default 'ddpm') and
+encapsulated in a single self.np object.  All three processes (DDPM, flow,
+VPSDE) expose the same interface, so _train_step, _evaluate, and _visualize
+contain no per-process branching.
+
+Config keys:
+    noise_process:   'ddpm' | 'flow' | 'vpsde'  (default: 'ddpm')
+
+    ddpm:   num_timesteps, beta_schedule ('cosine'|'linear'), min_snr_gamma
+    flow:   num_timesteps used as sinusoidal embedding scale (default 1000)
+    vpsde:  vpsde_beta_min (default 0.01), vpsde_beta_max (default 5.0),
+            min_snr_gamma (default 0 = unweighted MSE),
+            num_timesteps used as sinusoidal embedding scale (default 1000)
 """
 
 import os
@@ -12,13 +22,14 @@ import torch
 import torch.nn.functional as F
 import matplotlib
 matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 import wandb
 from typing import Optional
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
 
 from scripts.base_trainer import BaseTrainer
-from utils import _cosine_betas, visualize_unet_one_step
+from models.noise_process import DDPM, RectifiedFlow, VPSDE
 
 
 class DiffusionTrainer(BaseTrainer):
@@ -39,7 +50,7 @@ class DiffusionTrainer(BaseTrainer):
         self.val_dataloader = val_dataloader
         self.best_val_loss = float("inf")
 
-        self.unconditional = getattr(self.config, 'unconditional', False)
+        self.unconditional = getattr(config, 'unconditional', False)
         if self.unconditional:
             print("Train for unconditional generation")
 
@@ -48,24 +59,35 @@ class DiffusionTrainer(BaseTrainer):
         for p in self.vae_model.parameters():
             p.requires_grad_(False)
 
-        # Noise schedule buffers (registered on device)
-        T = config.num_timesteps
-        if config.beta_schedule == 'cosine':
-            betas = _cosine_betas(T)
-        elif config.beta_schedule == 'linear':
-            betas = torch.linspace(1e-4, 0.02, T)
-        else:
-            raise ValueError(f"Unknown beta_schedule: {config.beta_schedule}")
+        self.np, self._embed_scale = self._build_noise_process(config, device)
+        print(f"Noise process: {type(self.np).__name__}")
 
-        alphas = 1.0 - betas
-        alphas_cumprod = torch.cumprod(alphas, dim=0)
+    @staticmethod
+    def _build_noise_process(config, device):
+        """Construct the noise process object and its sinusoidal embedding scale."""
+        np_type       = getattr(config, 'noise_process', 'ddpm')
+        embed_scale   = getattr(config, 'num_timesteps', 1000)
+        min_snr_gamma = getattr(config, 'min_snr_gamma', 5.0)
 
-        self.register_buffer = lambda name, val: setattr(self, name, val.to(device))
-        self.register_buffer('betas', betas)
-        self.register_buffer('sqrt_alphas_cumprod', alphas_cumprod.sqrt())
-        self.register_buffer('sqrt_one_minus_alphas_cumprod', (1 - alphas_cumprod).sqrt())
-        # SNR_t = ᾱ_t / (1 - ᾱ_t); used for Min-SNR-γ loss weighting
-        self.register_buffer('snr', alphas_cumprod / (1.0 - alphas_cumprod))
+        if np_type == 'ddpm':
+            return DDPM(
+                num_timesteps=config.num_timesteps,
+                beta_schedule=config.beta_schedule,
+                min_snr_gamma=min_snr_gamma,
+                device=device,
+            ), embed_scale
+
+        if np_type == 'flow':
+            return RectifiedFlow(), embed_scale
+
+        if np_type == 'vpsde':
+            return VPSDE(
+                beta_min=getattr(config, 'vpsde_beta_min', 0.01),
+                beta_max=getattr(config, 'vpsde_beta_max', 5.0),
+                min_snr_gamma=getattr(config, 'min_snr_gamma', 0.0),
+            ), embed_scale
+
+        raise ValueError(f"Unknown noise_process: {np_type!r}")
 
     # ── Training loop ─────────────────────────────────────────────────────────
 
@@ -81,7 +103,6 @@ class DiffusionTrainer(BaseTrainer):
         loader_iter = iter(self.train_dataloader)
 
         while self.step < self.config.num_steps:
-            # Cycle through dataset indefinitely
             try:
                 batch = next(loader_iter)
             except StopIteration:
@@ -93,10 +114,7 @@ class DiffusionTrainer(BaseTrainer):
 
             if not self.step % self.config.log_interval:
                 print(f"Step {self.step}/{self.config.num_steps}")
-                wandb.log({
-                    "train/loss": loss,
-                    "train/grad_norm": grad_norm,
-                }, step=self.step)
+                wandb.log({"train/loss": loss, "train/grad_norm": grad_norm}, step=self.step)
 
             if self.val_dataloader is not None and not self.step % self.config.eval_interval:
                 val_loss = self._evaluate()
@@ -112,45 +130,36 @@ class DiffusionTrainer(BaseTrainer):
 
         print("\n=== Training Complete ===\n")
 
+    # ── Shared helpers ────────────────────────────────────────────────────────
+
+    def _get_conditioning(self, x0: torch.Tensor, B: int) -> torch.Tensor:
+        """Return z [B, latent_dim], with CFG dropout applied if configured."""
+        if self.unconditional:
+            return torch.zeros(B, self.config.latent_dim, device=self.device)
+        with torch.no_grad():
+            z, _ = self.vae_model.encode(x0)
+        if self.config.cfg_uncond_prob > 0.0:
+            null_mask = torch.rand(B, device=self.device) < self.config.cfg_uncond_prob
+            z = z.masked_fill(null_mask.unsqueeze(1), 0.0)
+        return z
+
+    # ── Single unified train / eval step ─────────────────────────────────────
+
     def _train_step(self, batch: torch.Tensor):
         x0 = batch.to(self.device)
+        B  = x0.shape[0]
+        z  = self._get_conditioning(x0, B)
 
-        B = x0.shape[0]
-
-        # Conditioning: frozen encoder → posterior mean μ
-        # When unconditional=True, skip the encoder and use the null token (z=0) always.
-        if self.unconditional:
-            z = torch.zeros(B, self.config.latent_dim, device=self.device)
-        else:
-            with torch.no_grad():
-                z, _ = self.vae_model.encode(x0)   # mu, logvar
-
-            # CFG conditioning dropout: zero out z for a random subset of samples so the
-            # model learns unconditional generation alongside conditional. z=0 is the null token.
-            if self.config.cfg_uncond_prob > 0.0:
-                null_mask = torch.rand(B, device=self.device) < self.config.cfg_uncond_prob
-                z = z.masked_fill(null_mask.unsqueeze(1), 0.0)
-
-        # Sample t and noise
-        t = torch.randint(0, self.config.num_timesteps, (B,), device=self.device)
-        eps = torch.randn_like(x0)
-
-        # Forward diffusion: x_t = sqrt(ᾱ_t) * x0 + sqrt(1-ᾱ_t) * ε
-        sqrt_a = self.sqrt_alphas_cumprod[t][:, None, None, None]
-        sqrt_1ma = self.sqrt_one_minus_alphas_cumprod[t][:, None, None, None]
-        x_t = sqrt_a * x0 + sqrt_1ma * eps
+        t        = self.np.sample_t(B, self.device)
+        x_t, eps = self.np.corrupt(x0, t)
+        target   = self.np.get_target(x0, eps)
+        t_embed  = self.np.embed_t(t, self._embed_scale)
 
         self.optimizer.zero_grad()
-        eps_pred = self.model(x_t, t, z)
-
-        # Min-SNR-γ weighting: downweight easy high-noise timesteps so the model
-        # is forced to learn low-noise denoising that actually drives sample quality.
-        # weight_t = min(SNR_t, γ) / SNR_t  (Hang et al. 2023, γ=5 is standard)
-        snr_t = self.snr[t]                                              # [B]
-        weight = (snr_t.clamp(max=self.config.min_snr_gamma) / snr_t).detach()
-        loss_per_sample = F.mse_loss(eps_pred, eps, reduction='none').mean(dim=[1, 2, 3])
-        loss = (loss_per_sample * weight).mean()
+        pred = self.model(x_t, t_embed, z)
+        loss = self.np.loss(pred, target, t)
         loss.backward()
+
         grad_norm = clip_grad_norm_(self.model.parameters(), self.config.max_grad_norm).item()
         self.optimizer.step()
         if self.scheduler is not None:
@@ -164,41 +173,88 @@ class DiffusionTrainer(BaseTrainer):
         total, n = 0.0, 0
         for batch in self.val_dataloader:
             x0 = batch.to(self.device)
-            if self.unconditional:
-                z = torch.zeros(batch.shape[0], self.config.latent_dim, device=self.device)
-            else:
-                z, _ = self.vae_model.encode(x0)
-            B = x0.shape[0]
-            t = torch.randint(0, self.config.num_timesteps, (B,), device=self.device)
-            eps = torch.randn_like(x0)
-            sqrt_a = self.sqrt_alphas_cumprod[t][:, None, None, None]
-            sqrt_1ma = self.sqrt_one_minus_alphas_cumprod[t][:, None, None, None]
-            x_t = sqrt_a * x0 + sqrt_1ma * eps
-            eps_pred = self.model(x_t, t, z)
-            snr_t = self.snr[t]
-            weight = (snr_t.clamp(max=self.config.min_snr_gamma) / snr_t).detach()
-            loss_per_sample = F.mse_loss(eps_pred, eps, reduction='none').mean(dim=[1, 2, 3])
-            total += ((loss_per_sample * weight).sum()).item()
+            B  = x0.shape[0]
+            z  = self._get_conditioning(x0, B)
+
+            t        = self.np.sample_t(B, self.device)
+            x_t, eps = self.np.corrupt(x0, t)
+            target   = self.np.get_target(x0, eps)
+            t_embed  = self.np.embed_t(t, self._embed_scale)
+
+            pred = self.model(x_t, t_embed, z)
+            loss = self.np.loss(pred, target, t)
+            total += loss.item() * B
             n += B
+
         self.model.train()
         return total / n
+
+    # ── Visualization ─────────────────────────────────────────────────────────
 
     @torch.no_grad()
     def _visualize(self, step: int):
         self.model.eval()
         batch = next(iter(self.val_dataloader))
-        n = min(8, batch.shape[0])
+        n  = min(8, batch.shape[0])
         x0 = batch[:n].to(self.device)
-        if self.unconditional:
-            z = torch.zeros(n, self.config.latent_dim, device=self.device)
-        else:
-            z, _ = self.vae_model.encode(x0)
-        schedule = {
-            'sqrt_alphas_cumprod':           self.sqrt_alphas_cumprod,
-            'sqrt_one_minus_alphas_cumprod': self.sqrt_one_minus_alphas_cumprod,
-        }
+        z  = self._get_conditioning(x0, n)
         path = os.path.join(self.vis_dir, f'step_{step:07d}.png')
-        visualize_unet_one_step(self.model, x0, z, schedule, self.config.num_timesteps,
-                                self.device, save_path=path, title=f'Step {step}')
+        self._visualize_one_step(x0, z, path, title=f'Step {step}')
         self.model.train()
         print(f"  Saved visualization → {path}")
+
+    @torch.no_grad()
+    def _visualize_one_step(
+        self,
+        x0: torch.Tensor,
+        z: torch.Tensor,
+        save_path: str,
+        title: Optional[str] = None,
+    ) -> None:
+        """
+        One-step reconstruction diagnostic for all noise processes.
+
+        Shows x0, x_t, and x0_pred = np.predict_x0(x_t, model(x_t,t,z), t)
+        at each of np.vis_t_vals().
+        """
+        n      = x0.shape[0]
+        t_vals = self.np.vis_t_vals()
+        n_rows = 1 + 2 * len(t_vals)
+
+        fig, axes = plt.subplots(n_rows, n, figsize=(n * 2, n_rows * 2), squeeze=False)
+
+        def _show(ax, img):
+            img = img.cpu().permute(1, 2, 0).float().numpy().clip(0, 1)
+            if img.shape[-1] == 1:
+                ax.imshow(img.squeeze(-1), cmap='gray', vmin=0, vmax=1)
+            else:
+                ax.imshow(img)
+            ax.axis('off')
+
+        row_labels = ['x0']
+        for tv in t_vals:
+            row_labels += [f'x_t  t={tv}', f'x_pred  t={tv}']
+
+        for col in range(n):
+            _show(axes[0, col], x0[col])
+
+        for ti, t_val in enumerate(t_vals):
+            t_tensor = torch.full((n,), t_val, device=self.device, dtype=self.np.dtype)
+            x_t, eps = self.np.corrupt(x0, t_tensor)
+            t_embed  = self.np.embed_t(t_tensor, self._embed_scale)
+            pred     = self.model(x_t, t_embed, z)
+            x0_pred  = self.np.predict_x0(x_t, pred, t_tensor)
+
+            row_xt = 1 + 2 * ti
+            for col in range(n):
+                _show(axes[row_xt,     col], x_t[col].clamp(0, 1))
+                _show(axes[row_xt + 1, col], x0_pred[col].clamp(0, 1))
+
+        for row, label in enumerate(row_labels):
+            axes[row, 0].set_ylabel(label, fontsize=7, rotation=0,
+                                    ha='right', va='center', labelpad=55)
+        if title:
+            fig.suptitle(title, fontsize=9)
+        plt.tight_layout()
+        fig.savefig(save_path, dpi=80, bbox_inches='tight')
+        plt.close(fig)
