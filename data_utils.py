@@ -156,6 +156,52 @@ def build_celeba_dataloaders(
     return train_dl, test_dl
 
 
+def build_tiny_imagenet_dataloaders(
+    data_dir: str,
+    image_size: int = 64,
+    train_split: float = 0.9,
+    batch_size: int = 64,
+    num_workers: int = 4,
+    seed: int = 42,
+) -> Tuple[DataLoader, DataLoader]:
+    """Return (train_dl, val_dl) over Tiny ImageNet yielding [B, C, H, W] in [0, 1].
+
+    Scans train/ (100K images across 200 class subdirs) and val/images/ (10K flat).
+    Labels are ignored — this is for VAE pretraining.
+    Images are natively 64×64; image_size allows resizing if needed.
+    """
+    paths = (
+        _find_all_images(os.path.join(data_dir, "train"))
+        + _find_all_images(os.path.join(data_dir, "val", "images"))
+    )
+    if not paths:
+        raise FileNotFoundError(f"No images found under {data_dir}")
+
+    train_idx, test_idx = _split(len(paths), train_split, seed)
+    train_paths = [paths[i] for i in train_idx.tolist()]
+    test_paths  = [paths[i] for i in test_idx.tolist()]
+
+    transform = transforms.Compose([
+        transforms.Resize((image_size, image_size)),
+        transforms.ToTensor(),
+    ])
+    train_dl = DataLoader(
+        _PathDataset(train_paths, transform),
+        batch_size=batch_size, shuffle=True, num_workers=num_workers,
+        pin_memory=True, drop_last=True,
+    )
+    test_dl = DataLoader(
+        _PathDataset(test_paths, transform),
+        batch_size=batch_size, shuffle=False, num_workers=num_workers,
+        pin_memory=True,
+    )
+    print(
+        f"Tiny ImageNet — Train: {len(train_paths)} images ({len(train_dl)} batches/epoch) | "
+        f"Test: {len(test_paths)} images ({len(test_dl)} batches)"
+    )
+    return train_dl, test_dl
+
+
 def build_dataloaders(cfg) -> Tuple[DataLoader, DataLoader]:
     """Dispatch to the right dataloader based on cfg.dataset_type."""
     dataset_type = getattr(cfg, "dataset_type", "cfd")
@@ -165,6 +211,13 @@ def build_dataloaders(cfg) -> Tuple[DataLoader, DataLoader]:
 
     if dataset_type == "celeba":
         return build_celeba_dataloaders(
+            data_dir=cfg.data_dir,
+            image_size=h,
+            train_split=cfg.train_split,
+            batch_size=cfg.batch_size,
+        )
+    elif dataset_type == "tiny_imagenet":
+        return build_tiny_imagenet_dataloaders(
             data_dir=cfg.data_dir,
             image_size=h,
             train_split=cfg.train_split,
