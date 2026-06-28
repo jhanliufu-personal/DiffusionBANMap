@@ -23,13 +23,13 @@ def _find_images(data_dir: str, expressions: List[str]) -> List[str]:
 
 
 def _find_all_images(data_dir: str) -> List[str]:
-    """Walk data_dir and return paths of all JPEG/PNG images."""
+    """Walk data_dir and return paths of all JPEG/PNG/TIFF images."""
     paths = []
     for root, _, files in os.walk(data_dir):
         for fname in files:
             if "Zone.Identifier" in fname:
                 continue
-            if fname.lower().endswith((".jpg", ".jpeg", ".png")):
+            if fname.lower().endswith((".jpg", ".jpeg", ".png", ".tif", ".tiff")):
                 paths.append(os.path.join(root, fname))
     return sorted(paths)
 
@@ -202,6 +202,68 @@ def build_tiny_imagenet_dataloaders(
     return train_dl, test_dl
 
 
+def build_encode_dataloader(
+    data_dir: str,
+    image_size: int = 224,
+    batch_size: int = 64,
+    num_workers: int = 4,
+) -> DataLoader:
+    """Return a single DataLoader over all images in data_dir for encoding/inference."""
+    paths = _find_all_images(data_dir)
+    if not paths:
+        raise FileNotFoundError(f"No images found in {data_dir}")
+    transform = transforms.Compose([
+        transforms.Resize((image_size, image_size)),
+        transforms.ToTensor(),
+    ])
+    print(f"Encode set: {len(paths)} images ({-(-len(paths) // batch_size)} batches)")
+    return DataLoader(
+        _PathDataset(paths, transform),
+        batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True,
+    )
+
+
+def build_stimuli_dataloaders(
+    data_dir: str,
+    image_size: int = 224,
+    train_split: float = 0.9,
+    batch_size: int = 64,
+    num_workers: int = 4,
+    seed: int = 42,
+) -> Tuple[DataLoader, DataLoader]:
+    """Return (train_dl, test_dl) over a flat directory of stimuli images.
+
+    Images are loaded on-the-fly and converted to RGB (handles grayscale TIFF).
+    """
+    paths = _find_all_images(data_dir)
+    if not paths:
+        raise FileNotFoundError(f"No images found in {data_dir}")
+
+    train_idx, test_idx = _split(len(paths), train_split, seed)
+    train_paths = [paths[i] for i in train_idx.tolist()]
+    test_paths  = [paths[i] for i in test_idx.tolist()]
+
+    transform = transforms.Compose([
+        transforms.Resize((image_size, image_size)),
+        transforms.ToTensor(),
+    ])
+    train_dl = DataLoader(
+        _PathDataset(train_paths, transform),
+        batch_size=batch_size, shuffle=True, num_workers=num_workers,
+        pin_memory=True, drop_last=True,
+    )
+    test_dl = DataLoader(
+        _PathDataset(test_paths, transform),
+        batch_size=batch_size, shuffle=False, num_workers=num_workers,
+        pin_memory=True,
+    )
+    print(
+        f"Stimuli — Train: {len(train_paths)} images ({len(train_dl)} batches/epoch) | "
+        f"Test: {len(test_paths)} images ({len(test_dl)} batches)"
+    )
+    return train_dl, test_dl
+
+
 def build_dataloaders(cfg) -> Tuple[DataLoader, DataLoader]:
     """Dispatch to the right dataloader based on cfg.dataset_type."""
     dataset_type = getattr(cfg, "dataset_type", "cfd")
@@ -218,6 +280,13 @@ def build_dataloaders(cfg) -> Tuple[DataLoader, DataLoader]:
         )
     elif dataset_type == "tiny_imagenet":
         return build_tiny_imagenet_dataloaders(
+            data_dir=cfg.data_dir,
+            image_size=h,
+            train_split=cfg.train_split,
+            batch_size=cfg.batch_size,
+        )
+    elif dataset_type == "stimuli":
+        return build_stimuli_dataloaders(
             data_dir=cfg.data_dir,
             image_size=h,
             train_split=cfg.train_split,
