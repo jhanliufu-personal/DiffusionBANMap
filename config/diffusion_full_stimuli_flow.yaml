@@ -1,5 +1,5 @@
-experiment_name: diffusion_full_stimuli_ddpm
-output_dir: outputs/diffusion_full_stimuli_ddpm
+experiment_name: diffusion_full_stimuli_flow
+output_dir: outputs/diffusion_full_stimuli_flow
 
 # Data
 dataset_type: stimuli
@@ -18,7 +18,7 @@ dropout: 0.1
 
 # Diffusion
 unconditional: false
-noise_process: ddpm
+noise_process: flow
 num_timesteps: 1000
 beta_schedule: cosine
 min_snr_gamma: 5.0
