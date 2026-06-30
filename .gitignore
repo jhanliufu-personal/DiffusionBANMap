@@ -16,6 +16,7 @@ uv.lock
 # *.ipynb
 
 # Data and outputs
+data/
 datasets/
 outputs/
 *.pkl
