@@ -9,11 +9,11 @@ batch_size: 32
 
 # UNet
 in_channels: 3
-image_size: 224
-model_channels: 112
-channel_mult: [1, 2, 2, 4]
+image_size: 64
+model_channels: 64
+channel_mult: [1, 2, 4] 
 num_res_blocks: 2
-attention_resolutions: [32, 64]
+attention_resolutions: [16]
 dropout: 0.1
 
 # Diffusion

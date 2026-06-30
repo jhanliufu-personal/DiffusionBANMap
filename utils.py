@@ -26,7 +26,9 @@ def make_run_tag(cfg) -> str:
         T = getattr(cfg, 'num_timesteps', 1000)
         # For DDPM show the schedule; for continuous processes show the process name
         sched = getattr(cfg, 'beta_schedule', np_type) if np_type == 'ddpm' else np_type
-        return f"h{cfg.image_size}_mc{cfg.model_channels}_ch{ch}_T{T}_{sched}_z{cfg.latent_dim}"
+        
+        uncond = "_uncond" if getattr(cfg, "unconditional", False) else ""
+        return f"h{cfg.image_size}_mc{cfg.model_channels}_ch{ch}_T{T}_{sched}{uncond}_z{cfg.latent_dim}"
 
 
 def discover_device() -> Literal["cuda", "mps", "cpu"]:
