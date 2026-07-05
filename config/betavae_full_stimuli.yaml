@@ -9,8 +9,8 @@ batch_size: 32
 
 # Model
 input_channels: 3
-input_height: 64
-input_width: 64
+input_height: 224
+input_width: 224
 latent_dim: 12
 hidden_dim: 128
 beta: 4.0

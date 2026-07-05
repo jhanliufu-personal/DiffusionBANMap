@@ -37,7 +37,7 @@ class DiffusionTrainer(BaseTrainer):
     def __init__(
         self,
         model: torch.nn.Module,
-        vae_model: torch.nn.Module,
+        vae_model: Optional[torch.nn.Module],
         optimizer: torch.optim.Optimizer,
         scheduler: Optional[torch.optim.lr_scheduler.LRScheduler],
         train_dataloader: Optional[DataLoader],
@@ -54,10 +54,13 @@ class DiffusionTrainer(BaseTrainer):
         if self.unconditional:
             print("Train for unconditional generation")
 
-        # Frozen beta-VAE encoder — never updated
-        self.vae_model = vae_model.to(device).eval()
-        for p in self.vae_model.parameters():
-            p.requires_grad_(False)
+        # Frozen beta-VAE encoder — never updated. Unconditional runs need no VAE at all.
+        if vae_model is not None:
+            self.vae_model = vae_model.to(device).eval()
+            for p in self.vae_model.parameters():
+                p.requires_grad_(False)
+        else:
+            self.vae_model = None
 
         self.np, self._embed_scale = self._build_noise_process(config, device)
         print(f"Noise process: {type(self.np).__name__}")

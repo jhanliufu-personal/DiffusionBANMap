@@ -1,6 +1,7 @@
 import os
 from typing import List, Tuple
 
+import numpy as np
 import torch
 from PIL import Image
 from torch.utils.data import DataLoader, Dataset
@@ -55,6 +56,27 @@ class _TensorDataset(Dataset):
 
     def __getitem__(self, idx: int) -> torch.Tensor:
         return self.tensor[idx]
+
+
+class _ImageNet64ArrayDataset(Dataset):
+    """Memory-maps a (N, 3, 64, 64) uint8 array produced by prepare_imagenet64_dataset.py.
+
+    Backed by disk (np.load(mmap_mode='r')) rather than preloaded into RAM, since the
+    full training set (~15 GB) can exceed a standard Colab runtime's memory.
+    """
+
+    def __init__(self, npy_path: str, image_size: int = 64):
+        self.images = np.load(npy_path, mmap_mode='r')
+        self._resize = transforms.Resize(image_size) if image_size != 64 else None
+
+    def __len__(self) -> int:
+        return len(self.images)
+
+    def __getitem__(self, idx: int) -> torch.Tensor:
+        img = torch.from_numpy(np.array(self.images[idx])).float() / 255.0
+        if self._resize is not None:
+            img = self._resize(img)
+        return img
 
 
 def _preload(paths: List[str], image_size: Tuple[int, int]) -> torch.Tensor:
@@ -202,6 +224,45 @@ def build_tiny_imagenet_dataloaders(
     return train_dl, test_dl
 
 
+def build_imagenet64_dataloaders(
+    data_dir: str,
+    image_size: int = 64,
+    batch_size: int = 64,
+    num_workers: int = 4,
+    seed: int = 42,
+) -> Tuple[DataLoader, DataLoader]:
+    """Return (train_dl, val_dl) over the pre-downsampled ImageNet64 benchmark
+    (van den Oord et al. pickled-batch format, consolidated into flat train_images.npy /
+    val_images.npy arrays by scripts/prepare_imagenet64_dataset.py).
+
+    Images are already 64×64 uint8 arrays — memory-mapped from disk rather than
+    preloaded, since the full training set (~15 GB) can exceed a standard Colab
+    runtime's RAM. Honors the benchmark's own train/val split.
+    """
+    train_path = os.path.join(data_dir, "train_images.npy")
+    val_path = os.path.join(data_dir, "val_images.npy")
+    if not os.path.exists(train_path) or not os.path.exists(val_path):
+        raise FileNotFoundError(
+            f"Expected {train_path} and {val_path} — run scripts/prepare_imagenet64_dataset.py first"
+        )
+
+    train_dl = DataLoader(
+        _ImageNet64ArrayDataset(train_path, image_size),
+        batch_size=batch_size, shuffle=True, num_workers=num_workers,
+        pin_memory=True, drop_last=True,
+    )
+    val_dl = DataLoader(
+        _ImageNet64ArrayDataset(val_path, image_size),
+        batch_size=batch_size, shuffle=False, num_workers=num_workers,
+        pin_memory=True,
+    )
+    print(
+        f"ImageNet64 — Train: {len(train_dl.dataset):,} images ({len(train_dl)} batches/epoch) | "
+        f"Val: {len(val_dl.dataset):,} images ({len(val_dl)} batches)"
+    )
+    return train_dl, val_dl
+
+
 def build_encode_dataloader(
     data_dir: str,
     image_size: int = 224,
@@ -290,6 +351,12 @@ def build_dataloaders(cfg) -> Tuple[DataLoader, DataLoader]:
             data_dir=cfg.data_dir,
             image_size=h,
             train_split=cfg.train_split,
+            batch_size=cfg.batch_size,
+        )
+    elif dataset_type == "imagenet64":
+        return build_imagenet64_dataloaders(
+            data_dir=cfg.data_dir,
+            image_size=h,
             batch_size=cfg.batch_size,
         )
     else:

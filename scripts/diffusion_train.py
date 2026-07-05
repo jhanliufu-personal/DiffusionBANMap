@@ -43,7 +43,8 @@ if __name__ == "__main__":
     cfg.output_dir = f"{cfg.output_dir}_{make_run_tag(cfg)}"
     device = torch.device(discover_device())
 
-    vae = _load_frozen_vae(cfg, device)
+    unconditional = getattr(cfg, "unconditional", False)
+    vae = None if unconditional else _load_frozen_vae(cfg, device)
 
     model = UNet(
         in_channels=cfg.in_channels,
@@ -53,6 +54,7 @@ if __name__ == "__main__":
         num_res_blocks=cfg.num_res_blocks,
         attention_resolutions=cfg.attention_resolutions,
         dropout=cfg.dropout,
+        num_head_channels=getattr(cfg, "num_head_channels", 64),
         latent_dim=cfg.latent_dim,
     )
     count_model_params(model)

@@ -1,10 +1,16 @@
 """
-Conditional UNet for pixel-space diffusion.
+Conditional UNet for pixel-space diffusion / flow matching.
 
-Architecture follows DDPM (Ho et al. 2020) with:
+Architecture follows ADM (Dhariwal & Nichol 2021, "Diffusion Models Beat GANs"),
+the same U-Net used in the original Flow Matching paper (Lipman et al. 2023)
+for its ImageNet experiments:
   - Sinusoidal timestep embeddings
-  - ResBlocks with GroupNorm + SiLU
-  - Self-attention at specified resolutions
+  - ResBlocks with GroupNorm + SiLU, AdaGN conditioning (scale+shift from the
+    combined time + latent embedding), and BigGAN-style up/down resampling
+    (parameter-free resample applied to both the main and skip paths, folded
+    into the ResBlock instead of a separate strided conv)
+  - Multi-head self-attention at specified resolutions (fixed channels/head,
+    so head count grows with channel width like ADM)
   - β-VAE latent conditioning: project z → time_emb_dim, add to time embedding
 """
 
@@ -25,18 +31,62 @@ def timestep_embedding(t: torch.Tensor, dim: int) -> torch.Tensor:
     return torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
 
 
-class ResBlock(nn.Module):
+class Upsample(nn.Module):
+    """Parameter-free nearest-neighbor 2x upsample (BigGAN-style resample used inside ResBlock)."""
 
-    def __init__(self, in_ch: int, out_ch: int, t_dim: int, dropout: float = 0.0):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return F.interpolate(x, scale_factor=2.0, mode='nearest')
+
+
+class Downsample(nn.Module):
+    """Parameter-free 2x average-pool downsample (BigGAN-style resample used inside ResBlock)."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return F.avg_pool2d(x, kernel_size=2, stride=2)
+
+
+class ResBlock(nn.Module):
+    """
+    ADM-style ResBlock.
+
+    Conditioning (time + latent, pre-combined into t_emb by the caller) is injected
+    via AdaGN: the block predicts a per-channel scale and shift from t_emb and applies
+    them at the second GroupNorm, rather than adding a plain bias.
+
+    If up/down is set, a parameter-free resample (nearest-upsample or avg-pool-downsample)
+    is applied to both the main path and the skip path before the main-path convolutions,
+    matching BigGAN/ADM's approach of folding resampling into the residual block instead
+    of using a dedicated strided/transposed conv between blocks.
+    """
+
+    def __init__(
+        self,
+        in_ch: int,
+        out_ch: int,
+        t_dim: int,
+        dropout: float = 0.0,
+        up: bool = False,
+        down: bool = False,
+    ):
         super().__init__()
-        self.in_layers = nn.Sequential(
-            nn.GroupNorm(32, in_ch),
-            nn.SiLU(),
-            nn.Conv2d(in_ch, out_ch, 3, padding=1),
-        )
-        self.t_proj = nn.Sequential(nn.SiLU(), nn.Linear(t_dim, out_ch))
-        self.out_layers = nn.Sequential(
-            nn.GroupNorm(32, out_ch),
+        assert not (up and down)
+        self.in_norm = nn.GroupNorm(32, in_ch)
+        self.in_act = nn.SiLU()
+        self.in_conv = nn.Conv2d(in_ch, out_ch, 3, padding=1)
+
+        if up:
+            self.h_upd = Upsample()
+            self.x_upd = Upsample()
+        elif down:
+            self.h_upd = Downsample()
+            self.x_upd = Downsample()
+        else:
+            self.h_upd = nn.Identity()
+            self.x_upd = nn.Identity()
+
+        self.emb_layers = nn.Sequential(nn.SiLU(), nn.Linear(t_dim, 2 * out_ch))
+        self.out_norm = nn.GroupNorm(32, out_ch)
+        self.out_rest = nn.Sequential(
             nn.SiLU(),
             nn.Dropout(dropout),
             nn.Conv2d(out_ch, out_ch, 3, padding=1),
@@ -44,14 +94,19 @@ class ResBlock(nn.Module):
         self.skip = nn.Conv2d(in_ch, out_ch, 1) if in_ch != out_ch else nn.Identity()
 
     def forward(self, x: torch.Tensor, t_emb: torch.Tensor) -> torch.Tensor:
-        h = self.in_layers(x)
-        h = h + self.t_proj(t_emb)[:, :, None, None]
-        h = self.out_layers(h)
-        return h + self.skip(x)
+        h = self.in_act(self.in_norm(x))
+        h = self.h_upd(h)
+        x = self.x_upd(x)
+        h = self.in_conv(h)
+
+        scale, shift = self.emb_layers(t_emb)[:, :, None, None].chunk(2, dim=1)
+        h = self.out_norm(h) * (1 + scale) + shift
+        h = self.out_rest(h)
+        return self.skip(x) + h
 
 
 class AttentionBlock(nn.Module):
-    """Single-head spatial self-attention with residual."""
+    """Multi-head spatial self-attention with residual."""
 
     def __init__(self, channels: int, num_heads: int = 1):
         super().__init__()
@@ -76,36 +131,19 @@ class AttentionBlock(nn.Module):
         return x + out
 
 
-class Downsample(nn.Module):
-    def __init__(self, channels: int):
-        super().__init__()
-        self.conv = nn.Conv2d(channels, channels, 3, stride=2, padding=1)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.conv(x)
-
-
-class Upsample(nn.Module):
-    def __init__(self, channels: int):
-        super().__init__()
-        self.conv = nn.Conv2d(channels, channels, 3, padding=1)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = F.interpolate(x, scale_factor=2.0, mode='nearest')
-        return self.conv(x)
-
-
 class UNet(nn.Module):
     """
-    Conditional UNet for pixel-space DDPM.
+    Conditional UNet for pixel-space diffusion / flow matching.
 
     Args:
         in_channels: image channels (e.g. 3)
-        model_channels: base channel count (e.g. 64 or 128)
-        channel_mult: channel multipliers per resolution level (e.g. [1, 2, 4])
+        model_channels: base channel count (e.g. 64 or 192)
+        channel_mult: channel multipliers per resolution level (e.g. [1, 2, 3, 4])
         num_res_blocks: ResBlocks per resolution level in the encoder
         attention_resolutions: spatial resolutions at which to apply self-attention
         dropout: dropout probability inside ResBlocks
+        num_head_channels: channels per attention head (ADM default: 64); the
+            number of heads at each resolution is channels // num_head_channels
         latent_dim: β-VAE latent dimension used for conditioning
         image_size: input spatial size (must be divisible by 2^(len(channel_mult)-1))
     """
@@ -118,13 +156,18 @@ class UNet(nn.Module):
         num_res_blocks: int = 2,
         attention_resolutions: List[int] = (16,),
         dropout: float = 0.1,
+        num_head_channels: int = 64,
         latent_dim: int = 10,
         image_size: int = 64,
     ):
         super().__init__()
         self._model_channels = model_channels
+        self._num_head_channels = num_head_channels
         t_dim = model_channels * 4
         ch_list = [model_channels * m for m in channel_mult]
+
+        def num_heads(channels: int) -> int:
+            return max(1, channels // num_head_channels)
 
         # ── Time + conditioning ────────────────────────────────────────────────
         self.time_embed = nn.Sequential(
@@ -150,18 +193,18 @@ class UNet(nn.Module):
             for _ in range(num_res_blocks):
                 level_blocks.append(ResBlock(in_ch, out_ch, t_dim, dropout))
                 if cur_res in attention_resolutions:
-                    level_blocks.append(AttentionBlock(out_ch))
+                    level_blocks.append(AttentionBlock(out_ch, num_heads(out_ch)))
                 skip_ch_list.append(out_ch)
                 in_ch = out_ch
             self.encoder.append(level_blocks)
             if level < len(ch_list) - 1:
-                self.downsamples.append(Downsample(in_ch))
+                self.downsamples.append(ResBlock(in_ch, in_ch, t_dim, dropout, down=True))
                 cur_res //= 2
                 skip_ch_list.append(in_ch)
 
         # ── Bottleneck ─────────────────────────────────────────────────────────
         self.mid1 = ResBlock(in_ch, in_ch, t_dim, dropout)
-        self.mid_attn = AttentionBlock(in_ch)
+        self.mid_attn = AttentionBlock(in_ch, num_heads(in_ch))
         self.mid2 = ResBlock(in_ch, in_ch, t_dim, dropout)
 
         # ── Decoder ───────────────────────────────────────────────────────────
@@ -174,11 +217,11 @@ class UNet(nn.Module):
                 skip_ch = skip_ch_list.pop()
                 level_blocks.append(ResBlock(in_ch + skip_ch, out_ch, t_dim, dropout))
                 if cur_res in attention_resolutions:
-                    level_blocks.append(AttentionBlock(out_ch))
+                    level_blocks.append(AttentionBlock(out_ch, num_heads(out_ch)))
                 in_ch = out_ch
             self.decoder.append(level_blocks)
             if level < len(ch_list) - 1:
-                self.upsamples.append(Upsample(in_ch))
+                self.upsamples.append(ResBlock(in_ch, in_ch, t_dim, dropout, up=True))
                 cur_res *= 2
 
         # ── Output ─────────────────────────────────────────────────────────────
@@ -192,7 +235,7 @@ class UNet(nn.Module):
             t: integer timesteps [B]
             z: β-VAE conditioning latent [B, latent_dim]
         Returns:
-            predicted noise ε [B, C, H, W]
+            predicted noise ε (or velocity, depending on the noise process) [B, C, H, W]
         """
         t_emb = self.time_embed(timestep_embedding(t, self._model_channels))
         t_emb = t_emb + self.cond_proj(z)
@@ -210,7 +253,7 @@ class UNet(nn.Module):
                     h = block(h)
                     skips[-1] = h   # attention doesn't add a new skip; update last
             if level < len(self.encoder) - 1:
-                h = self.downsamples[level](h)
+                h = self.downsamples[level](h, t_emb)
                 skips.append(h)
 
         # Bottleneck
@@ -226,6 +269,6 @@ class UNet(nn.Module):
                 else:
                     h = block(h)
             if level < len(self.decoder) - 1:
-                h = self.upsamples[level](h)
+                h = self.upsamples[level](h, t_emb)
 
         return self.out_conv(F.silu(self.out_norm(h)))
