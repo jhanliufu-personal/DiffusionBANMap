@@ -14,6 +14,11 @@ Config keys:
     vpsde:  vpsde_beta_min (default 0.01), vpsde_beta_max (default 5.0),
             min_snr_gamma (default 0 = unweighted MSE),
             num_timesteps used as sinusoidal embedding scale (default 1000)
+
+    mixed_precision: 'no' | 'bf16' | 'fp16'  (default: 'no')
+        'bf16' needs no loss scaling (safe default on Ampere+ GPUs).
+        'fp16' uses a GradScaler for loss scaling — needed on older GPUs
+        without native bf16 support.
 """
 
 import os
@@ -64,6 +69,24 @@ class DiffusionTrainer(BaseTrainer):
 
         self.np, self._embed_scale = self._build_noise_process(config, device)
         print(f"Noise process: {type(self.np).__name__}")
+
+        self.mixed_precision, self._amp_dtype, self.scaler = self._build_amp(config, device)
+        if self.mixed_precision != 'no':
+            active = "active" if self._amp_dtype is not None else f"inactive — {device.type} isn't cuda"
+            print(f"Mixed precision: {self.mixed_precision} ({active})")
+
+    @staticmethod
+    def _build_amp(config, device: torch.device):
+        """Set up autocast dtype + GradScaler. 'bf16' needs no scaler (disabled no-op);
+        'fp16' does. Autocast/scaling only apply on CUDA — elsewhere this is a no-op."""
+        mode = getattr(config, 'mixed_precision', 'no')
+        if mode not in ('no', 'bf16', 'fp16'):
+            raise ValueError(f"Unknown mixed_precision: {mode!r}")
+
+        use_amp = mode != 'no' and device.type == 'cuda'
+        amp_dtype = {'bf16': torch.bfloat16, 'fp16': torch.float16}.get(mode) if use_amp else None
+        scaler = torch.amp.GradScaler('cuda', enabled=(mode == 'fp16' and use_amp))
+        return mode, amp_dtype, scaler
 
     @staticmethod
     def _build_noise_process(config, device):
@@ -159,12 +182,15 @@ class DiffusionTrainer(BaseTrainer):
         t_embed  = self.np.embed_t(t, self._embed_scale)
 
         self.optimizer.zero_grad()
-        pred = self.model(x_t, t_embed, z)
-        loss = self.np.loss(pred, target, t)
-        loss.backward()
+        with torch.autocast(device_type=self.device.type, dtype=self._amp_dtype, enabled=self._amp_dtype is not None):
+            pred = self.model(x_t, t_embed, z)
+            loss = self.np.loss(pred, target, t)
+        self.scaler.scale(loss).backward()
 
+        self.scaler.unscale_(self.optimizer)
         grad_norm = clip_grad_norm_(self.model.parameters(), self.config.max_grad_norm).item()
-        self.optimizer.step()
+        self.scaler.step(self.optimizer)
+        self.scaler.update()
         if self.scheduler is not None:
             self.scheduler.step()
 
@@ -184,8 +210,9 @@ class DiffusionTrainer(BaseTrainer):
             target   = self.np.get_target(x0, eps)
             t_embed  = self.np.embed_t(t, self._embed_scale)
 
-            pred = self.model(x_t, t_embed, z)
-            loss = self.np.loss(pred, target, t)
+            with torch.autocast(device_type=self.device.type, dtype=self._amp_dtype, enabled=self._amp_dtype is not None):
+                pred = self.model(x_t, t_embed, z)
+                loss = self.np.loss(pred, target, t)
             total += loss.item() * B
             n += B
 
@@ -245,7 +272,8 @@ class DiffusionTrainer(BaseTrainer):
             t_tensor = torch.full((n,), t_val, device=self.device, dtype=self.np.dtype)
             x_t, eps = self.np.corrupt(x0, t_tensor)
             t_embed  = self.np.embed_t(t_tensor, self._embed_scale)
-            pred     = self.model(x_t, t_embed, z)
+            with torch.autocast(device_type=self.device.type, dtype=self._amp_dtype, enabled=self._amp_dtype is not None):
+                pred = self.model(x_t, t_embed, z)
             x0_pred  = self.np.predict_x0(x_t, pred, t_tensor)
 
             row_xt = 1 + 2 * ti

@@ -31,6 +31,7 @@ latent_dim: 1               # unused (z is a zero vector) since unconditional: t
 lr: 1.0e-4
 weight_decay: 0.0
 max_grad_norm: 1.0
+mixed_precision: bf16   # Ampere+ native bf16, no loss-scaling needed; halves activation memory
 
 # Training
 # batch_size=64 is sized for a single A100 40GB at this model size (~280M params);
