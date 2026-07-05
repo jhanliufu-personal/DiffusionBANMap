@@ -7,7 +7,7 @@ output_dir: outputs/diffusion_full_imagenet64_flow_uncond
 # not the Drive mount — the .npy is memory-mapped and needs fast random access.
 dataset_type: imagenet64
 data_dir: /content/data/imagenet64
-batch_size: 64
+batch_size: 32
 
 # UNet — matches the ADM ImageNet-64 config used by the original Flow Matching
 # paper (Lipman et al. 2023) for its ImageNet experiments.
