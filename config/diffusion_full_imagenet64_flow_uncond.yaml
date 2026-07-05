@@ -6,7 +6,7 @@ output_dir: outputs/diffusion_full_imagenet64_flow_uncond
 # On Colab, point this at local runtime disk (e.g. /content/data/imagenet64),
 # not the Drive mount — the .npy is memory-mapped and needs fast random access.
 dataset_type: imagenet64
-data_dir: data/imagenet64
+data_dir: /content/data/imagenet64
 batch_size: 64
 
 # UNet — matches the ADM ImageNet-64 config used by the original Flow Matching
