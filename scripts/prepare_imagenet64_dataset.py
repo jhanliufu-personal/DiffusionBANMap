@@ -48,9 +48,14 @@ def _copy_if_needed(src: str, dst: str) -> None:
 
 def _extract_zip(zip_path: str, out_dir: str) -> None:
     os.makedirs(out_dir, exist_ok=True)
+    marker = os.path.join(out_dir, f".extracted_{os.path.basename(zip_path)}")
+    if os.path.exists(marker):
+        print(f"Already extracted: {zip_path}")
+        return
     print(f"Extracting {zip_path} → {out_dir} ...")
     with zipfile.ZipFile(zip_path) as zf:
         zf.extractall(out_dir)
+    open(marker, "w").close()  # written last, so a crash mid-extract doesn't look "done"
 
 
 def _find_batches(root: str, name_substr: str) -> list:
@@ -62,31 +67,46 @@ def _find_batches(root: str, name_substr: str) -> list:
     return sorted(matches)
 
 
+def _get_data_field(d: dict) -> np.ndarray:
+    """'data' key is a plain str in this benchmark's pickles; fall back to bytes
+    in case a differently-repickled mirror stores it as a legacy Python 2 key."""
+    return np.asarray(d["data"] if "data" in d else d[b"data"])
+
+
 def _batch_num_images(path: str) -> int:
     with open(path, "rb") as f:
-        d = pickle.load(f, encoding="bytes")
-    return np.asarray(d[b"data"]).shape[0]
+        d = pickle.load(f)
+    return _get_data_field(d).shape[0]
 
 
 def _load_batch(path: str) -> np.ndarray:
     with open(path, "rb") as f:
-        d = pickle.load(f, encoding="bytes")
-    data = np.asarray(d[b"data"], dtype=np.uint8)
+        d = pickle.load(f)
+    data = _get_data_field(d).astype(np.uint8)
     return data.reshape(-1, 3, 64, 64)
 
 
 def _consolidate(batch_paths: list, out_path: str) -> None:
+    if os.path.exists(out_path):
+        print(f"Already consolidated: {out_path}")
+        return
+
     print(f"Consolidating {len(batch_paths)} batch file(s) → {out_path} ...")
     counts = [_batch_num_images(p) for p in batch_paths]
     total = sum(counts)
 
-    out = np.lib.format.open_memmap(out_path, mode="w+", dtype=np.uint8, shape=(total, 3, 64, 64))
+    # Write to a tmp path and rename into place at the end, so a crash mid-write
+    # can't leave a partially-filled file sitting at out_path looking complete.
+    tmp_path = out_path + ".tmp"
+    out = np.lib.format.open_memmap(tmp_path, mode="w+", dtype=np.uint8, shape=(total, 3, 64, 64))
     offset = 0
     for path, n in zip(batch_paths, counts):
         out[offset:offset + n] = _load_batch(path)
         offset += n
         print(f"  {offset:,}/{total:,} images written")
     out.flush()
+    del out
+    os.rename(tmp_path, out_path)
     print(f"  Done: {total:,} images ({total * 3 * 64 * 64 / 1e9:.1f} GB) → {out_path}")
 
 
@@ -100,6 +120,12 @@ def main() -> None:
     args = parser.parse_args()
 
     os.makedirs(args.data_dir, exist_ok=True)
+    train_out = os.path.join(args.data_dir, "train_images.npy")
+    val_out = os.path.join(args.data_dir, "val_images.npy")
+    if os.path.exists(train_out) and os.path.exists(val_out):
+        print(f"Already fully prepared: {train_out}, {val_out}")
+        return
+
     staging = os.path.join(args.data_dir, "_staging")
     os.makedirs(staging, exist_ok=True)
 
@@ -123,8 +149,8 @@ def main() -> None:
         raise FileNotFoundError(f"No val_data file found under {extract_dir}")
     print(f"Found {len(train_batches)} train batch file(s), {len(val_batches)} val batch file(s).")
 
-    _consolidate(train_batches, os.path.join(args.data_dir, "train_images.npy"))
-    _consolidate(val_batches, os.path.join(args.data_dir, "val_images.npy"))
+    _consolidate(train_batches, train_out)
+    _consolidate(val_batches, val_out)
 
     if args.cleanup:
         print("Removing staging directory (zips + raw pickle batches) ...")
