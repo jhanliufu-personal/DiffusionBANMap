@@ -1,5 +1,5 @@
 import os
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -63,20 +63,34 @@ class _ImageNet64ArrayDataset(Dataset):
 
     Backed by disk (np.load(mmap_mode='r')) rather than preloaded into RAM, since the
     full training set (~15 GB) can exceed a standard Colab runtime's memory.
+
+    If latents_path is given (an (N, latent_dim) array whose row i is the precomputed
+    conditioning latent for image row i — e.g. AlexNet-fc6-PCA latents written by
+    notebooks/alexnet_pca_latents.ipynb), __getitem__ returns (image, latent) tuples
+    instead of a plain image tensor.
     """
 
-    def __init__(self, npy_path: str, image_size: int = 64):
+    def __init__(self, npy_path: str, image_size: int = 64, latents_path: Optional[str] = None):
         self.images = np.load(npy_path, mmap_mode='r')
         self._resize = transforms.Resize(image_size) if image_size != 64 else None
+        self.latents = np.load(latents_path, mmap_mode='r') if latents_path is not None else None
+        if self.latents is not None and len(self.latents) != len(self.images):
+            raise ValueError(
+                f"Latents/images count mismatch: {len(self.latents)} ({latents_path}) "
+                f"vs {len(self.images)} ({npy_path})"
+            )
 
     def __len__(self) -> int:
         return len(self.images)
 
-    def __getitem__(self, idx: int) -> torch.Tensor:
+    def __getitem__(self, idx: int):
         img = torch.from_numpy(np.array(self.images[idx])).float() / 255.0
         if self._resize is not None:
             img = self._resize(img)
-        return img
+        if self.latents is None:
+            return img
+        latent = torch.from_numpy(np.array(self.latents[idx])).float()
+        return img, latent
 
 
 def _preload(paths: List[str], image_size: Tuple[int, int]) -> torch.Tensor:
@@ -230,6 +244,7 @@ def build_imagenet64_dataloaders(
     batch_size: int = 64,
     num_workers: int = 4,
     seed: int = 42,
+    shuffle_train: bool = True,
 ) -> Tuple[DataLoader, DataLoader]:
     """Return (train_dl, val_dl) over the pre-downsampled ImageNet64 benchmark
     (van den Oord et al. pickled-batch format, consolidated into flat train_images.npy /
@@ -238,6 +253,15 @@ def build_imagenet64_dataloaders(
     Images are already 64×64 uint8 arrays — memory-mapped from disk rather than
     preloaded, since the full training set (~15 GB) can exceed a standard Colab
     runtime's RAM. Honors the benchmark's own train/val split.
+
+    If train_latents.npy / val_latents.npy are also present in data_dir (written by
+    notebooks/alexnet_pca_latents.ipynb, row-aligned with train_images.npy / val_images.npy),
+    batches become (image, latent) tuples for precomputed-latent conditioning instead of
+    plain image tensors — no config flag needed, this is detected purely from what's on disk.
+
+    shuffle_train=False makes train_dl unshuffled with no dropped batch (val_dl already
+    behaves this way) — for a full, order-preserving pass (row i in == row i out), e.g.
+    extracting features to write those very latents files, rather than actual training.
     """
     train_path = os.path.join(data_dir, "train_images.npy")
     val_path = os.path.join(data_dir, "val_images.npy")
@@ -246,19 +270,30 @@ def build_imagenet64_dataloaders(
             f"Expected {train_path} and {val_path} — run scripts/prepare_imagenet64_dataset.py first"
         )
 
+    train_latents_path = os.path.join(data_dir, "train_latents.npy")
+    val_latents_path = os.path.join(data_dir, "val_latents.npy")
+    train_latents_path = train_latents_path if os.path.exists(train_latents_path) else None
+    val_latents_path = val_latents_path if os.path.exists(val_latents_path) else None
+    if (train_latents_path is None) != (val_latents_path is None):
+        raise FileNotFoundError(
+            f"Found latents for one split but not the other in {data_dir} — expected both "
+            "train_latents.npy and val_latents.npy, or neither."
+        )
+
     train_dl = DataLoader(
-        _ImageNet64ArrayDataset(train_path, image_size),
-        batch_size=batch_size, shuffle=True, num_workers=num_workers,
-        pin_memory=True, drop_last=True,
+        _ImageNet64ArrayDataset(train_path, image_size, train_latents_path),
+        batch_size=batch_size, shuffle=shuffle_train, num_workers=num_workers,
+        pin_memory=True, drop_last=shuffle_train,
     )
     val_dl = DataLoader(
-        _ImageNet64ArrayDataset(val_path, image_size),
+        _ImageNet64ArrayDataset(val_path, image_size, val_latents_path),
         batch_size=batch_size, shuffle=False, num_workers=num_workers,
         pin_memory=True,
     )
+    conditioning = "precomputed latents" if train_latents_path else "none (unconditional / on-the-fly VAE)"
     print(
         f"ImageNet64 — Train: {len(train_dl.dataset):,} images ({len(train_dl)} batches/epoch) | "
-        f"Val: {len(val_dl.dataset):,} images ({len(val_dl)} batches)"
+        f"Val: {len(val_dl.dataset):,} images ({len(val_dl)} batches) | conditioning: {conditioning}"
     )
     return train_dl, val_dl
 

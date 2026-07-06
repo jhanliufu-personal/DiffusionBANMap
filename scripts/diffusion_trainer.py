@@ -158,12 +158,32 @@ class DiffusionTrainer(BaseTrainer):
 
     # ── Shared helpers ────────────────────────────────────────────────────────
 
-    def _get_conditioning(self, x0: torch.Tensor, B: int) -> torch.Tensor:
-        """Return z [B, latent_dim], with CFG dropout applied if configured."""
-        if self.unconditional:
-            return torch.zeros(B, self.config.latent_dim, device=self.device)
-        with torch.no_grad():
-            z, _ = self.vae_model.encode(x0)
+    @staticmethod
+    def _unpack_batch(batch):
+        """Dataloaders yield either a plain image tensor, or (image, latent) tuples when
+        conditioning on precomputed latents (e.g. AlexNet-fc6-PCA) instead of an on-the-fly
+        VAE encode — see _ImageNet64ArrayDataset. Returns (x0, provided_z_or_None)."""
+        if isinstance(batch, (list, tuple)):
+            x0, z = batch
+            return x0, z
+        return batch, None
+
+    def _get_conditioning(self, x0: torch.Tensor, B: int, z: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """Return z [B, latent_dim], with CFG dropout applied if configured.
+
+        z is already-provided (precomputed) conditioning when the dataloader yields
+        (image, latent) pairs; otherwise falls back to unconditional zeros or an
+        on-the-fly VAE encode of x0.
+        """
+        if z is None:
+            if self.unconditional:
+                z = torch.zeros(B, self.config.latent_dim, device=self.device)
+            else:
+                with torch.no_grad():
+                    z, _ = self.vae_model.encode(x0)
+        else:
+            z = z.to(self.device)
+
         if self.config.cfg_uncond_prob > 0.0:
             null_mask = torch.rand(B, device=self.device) < self.config.cfg_uncond_prob
             z = z.masked_fill(null_mask.unsqueeze(1), 0.0)
@@ -171,10 +191,11 @@ class DiffusionTrainer(BaseTrainer):
 
     # ── Single unified train / eval step ─────────────────────────────────────
 
-    def _train_step(self, batch: torch.Tensor):
-        x0 = batch.to(self.device)
+    def _train_step(self, batch):
+        x0, z_provided = self._unpack_batch(batch)
+        x0 = x0.to(self.device)
         B  = x0.shape[0]
-        z  = self._get_conditioning(x0, B)
+        z  = self._get_conditioning(x0, B, z_provided)
 
         t        = self.np.sample_t(B, self.device)
         x_t, eps = self.np.corrupt(x0, t)
@@ -201,9 +222,10 @@ class DiffusionTrainer(BaseTrainer):
         self.model.eval()
         total, n = 0.0, 0
         for batch in self.val_dataloader:
-            x0 = batch.to(self.device)
+            x0, z_provided = self._unpack_batch(batch)
+            x0 = x0.to(self.device)
             B  = x0.shape[0]
-            z  = self._get_conditioning(x0, B)
+            z  = self._get_conditioning(x0, B, z_provided)
 
             t        = self.np.sample_t(B, self.device)
             x_t, eps = self.np.corrupt(x0, t)
@@ -225,9 +247,11 @@ class DiffusionTrainer(BaseTrainer):
     def _visualize(self, step: int):
         self.model.eval()
         batch = next(iter(self.val_dataloader))
-        n  = min(8, batch.shape[0])
-        x0 = batch[:n].to(self.device)
-        z  = self._get_conditioning(x0, n)
+        x0, z_provided = self._unpack_batch(batch)
+        n  = min(8, x0.shape[0])
+        x0 = x0[:n].to(self.device)
+        z_provided = z_provided[:n] if z_provided is not None else None
+        z  = self._get_conditioning(x0, n, z_provided)
         path = os.path.join(self.vis_dir, f'step_{step:07d}.png')
         self._visualize_one_step(x0, z, path, title=f'Step {step}')
         self.model.train()
