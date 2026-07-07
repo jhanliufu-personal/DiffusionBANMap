@@ -1,0 +1,43 @@
+experiment_name: diffusion_full_imagenet64_flow
+output_dir: outputs/diffusion_full_imagenet64_flow
+
+# Data — run scripts/prepare_imagenet64_dataset.py first (expects
+# <data_dir>/train_images.npy and <data_dir>/val_images.npy already consolidated).
+# On Colab, point this at local runtime disk (e.g. /content/data/imagenet64),
+# not the Drive mount — the .npy is memory-mapped and needs fast random access.
+dataset_type: imagenet64
+data_dir: /content/data/imagenet64
+batch_size: 32
+
+# UNet — matches the ADM ImageNet-64 config used by the original Flow Matching
+# paper (Lipman et al. 2023) for its ImageNet experiments.
+in_channels: 3
+image_size: 64
+model_channels: 192
+channel_mult: [1, 2, 3, 4]
+num_res_blocks: 3
+attention_resolutions: [32, 16, 8]
+num_head_channels: 64
+dropout: 0.1
+
+# Diffusion / flow matching
+unconditional: false
+noise_process: flow
+num_timesteps: 1000        # sinusoidal embedding scale only; flow itself uses t in [0,1]
+cfg_uncond_prob: 0.0
+latent_dim: 1               # unused (z is a zero vector) since unconditional: true
+
+# Optimizer
+lr: 1.0e-4
+weight_decay: 0.0
+max_grad_norm: 1.0
+mixed_precision: bf16   # Ampere+ native bf16, no loss-scaling needed; halves activation memory
+
+# Training
+# batch_size=64 is sized for a single A100 40GB at this model size (~280M params);
+# raise it if you have an 80GB card, or add grad-accumulation for a closer match
+# to the paper's effective batch of 2048. num_steps is a fraction of the paper's
+# training budget — bump it up for longer Colab/local runs, resuming with --resume.
+num_steps: 25000
+log_interval: 100
+eval_interval: 1000

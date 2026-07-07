@@ -122,10 +122,14 @@ def build_face_dataloaders(
     batch_size: int = 32,
     num_workers: int = 4,
     seed: int = 42,
+    shuffle_train: bool = True,
 ) -> Tuple[DataLoader, DataLoader]:
     """Return (train_dl, test_dl) that yield image tensors [B, C, H, W] in [0, 1].
 
     All images are preloaded into RAM for fast training-loop IO.
+
+    shuffle_train=False makes train_dl unshuffled with no dropped batch (test_dl already
+    behaves this way) — for a full, order-preserving pass instead of actual training.
     """
     paths = _find_images(data_dir, expressions)
     all_images = _preload(paths, image_size)
@@ -133,8 +137,8 @@ def build_face_dataloaders(
     train_idx, test_idx = _split(len(all_images), train_split, seed)
     train_dl = DataLoader(
         _TensorDataset(all_images[train_idx]),
-        batch_size=batch_size, shuffle=True, num_workers=num_workers,
-        pin_memory=True, drop_last=True,
+        batch_size=batch_size, shuffle=shuffle_train, num_workers=num_workers,
+        pin_memory=True, drop_last=shuffle_train,
     )
     test_dl = DataLoader(
         _TensorDataset(all_images[test_idx]),
@@ -156,11 +160,15 @@ def build_celeba_dataloaders(
     batch_size: int = 16,
     num_workers: int = 8,
     seed: int = 42,
+    shuffle_train: bool = True,
 ) -> Tuple[DataLoader, DataLoader]:
     """Return (train_dl, test_dl) over CelebA that yield [B, C, H, W] in [0, 1].
 
     Images are loaded on-the-fly (dataset is too large to preload into RAM).
     Standard preprocessing: center-crop to 178×178, then resize to image_size×image_size.
+
+    shuffle_train=False makes train_dl unshuffled with no dropped batch (test_dl already
+    behaves this way) — for a full, order-preserving pass instead of actual training.
     """
     paths = _find_all_images(data_dir)
     if not paths:
@@ -177,8 +185,8 @@ def build_celeba_dataloaders(
     ])
     train_dl = DataLoader(
         _PathDataset(train_paths, transform),
-        batch_size=batch_size, shuffle=True, num_workers=num_workers,
-        pin_memory=True, drop_last=True,
+        batch_size=batch_size, shuffle=shuffle_train, num_workers=num_workers,
+        pin_memory=True, drop_last=shuffle_train,
     )
     test_dl = DataLoader(
         _PathDataset(test_paths, transform),
@@ -199,12 +207,16 @@ def build_tiny_imagenet_dataloaders(
     batch_size: int = 64,
     num_workers: int = 4,
     seed: int = 42,
+    shuffle_train: bool = True,
 ) -> Tuple[DataLoader, DataLoader]:
     """Return (train_dl, val_dl) over Tiny ImageNet yielding [B, C, H, W] in [0, 1].
 
     Scans train/ (100K images across 200 class subdirs) and val/images/ (10K flat).
     Labels are ignored — this is for VAE pretraining.
     Images are natively 64×64; image_size allows resizing if needed.
+
+    shuffle_train=False makes train_dl unshuffled with no dropped batch (val_dl already
+    behaves this way) — for a full, order-preserving pass instead of actual training.
     """
     paths = (
         _find_all_images(os.path.join(data_dir, "train"))
@@ -223,8 +235,8 @@ def build_tiny_imagenet_dataloaders(
     ])
     train_dl = DataLoader(
         _PathDataset(train_paths, transform),
-        batch_size=batch_size, shuffle=True, num_workers=num_workers,
-        pin_memory=True, drop_last=True,
+        batch_size=batch_size, shuffle=shuffle_train, num_workers=num_workers,
+        pin_memory=True, drop_last=shuffle_train,
     )
     test_dl = DataLoader(
         _PathDataset(test_paths, transform),
@@ -326,10 +338,14 @@ def build_stimuli_dataloaders(
     batch_size: int = 64,
     num_workers: int = 4,
     seed: int = 42,
+    shuffle_train: bool = True,
 ) -> Tuple[DataLoader, DataLoader]:
     """Return (train_dl, test_dl) over a flat directory of stimuli images.
 
     Images are loaded on-the-fly and converted to RGB (handles grayscale TIFF).
+
+    shuffle_train=False makes train_dl unshuffled with no dropped batch (test_dl already
+    behaves this way) — for a full, order-preserving pass instead of actual training.
     """
     paths = _find_all_images(data_dir)
     if not paths:
@@ -345,8 +361,8 @@ def build_stimuli_dataloaders(
     ])
     train_dl = DataLoader(
         _PathDataset(train_paths, transform),
-        batch_size=batch_size, shuffle=True, num_workers=num_workers,
-        pin_memory=True, drop_last=True,
+        batch_size=batch_size, shuffle=shuffle_train, num_workers=num_workers,
+        pin_memory=True, drop_last=shuffle_train,
     )
     test_dl = DataLoader(
         _PathDataset(test_paths, transform),
