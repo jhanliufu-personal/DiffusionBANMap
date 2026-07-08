@@ -162,6 +162,8 @@ class DiffusionTrainer(BaseTrainer):
         print(f"\n=== Starting Diffusion Training ({self.config.num_steps} steps) ===\n")
         start_time = time.time()
         self.model = self.model.to(self.device).train()
+        if self.ema is not None:
+            self.ema.to(self.device)
 
         loader_iter = iter(self.train_dataloader)
 

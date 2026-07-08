@@ -38,6 +38,14 @@ class EMA:
         for name, p in model.named_parameters():
             self.shadow[name].mul_(d).add_(p.detach(), alpha=1 - d)
 
+    def to(self, device) -> "EMA":
+        """Move the shadow to `device`. Needed because __init__ snapshots whatever device
+        `model` is on at construction time — if the caller moves the model afterward (e.g.
+        DiffusionTrainer.train() does model.to(device) after __init__), the shadow is left
+        behind unless this is called too."""
+        self.shadow = {name: t.to(device) for name, t in self.shadow.items()}
+        return self
+
     def state_dict(self) -> dict:
         return {"decay": self.decay, "step": self.step, "shadow": self.shadow}
 
