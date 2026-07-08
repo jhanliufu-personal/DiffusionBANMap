@@ -16,6 +16,13 @@ Usage (inside a Colab notebook, after `drive.mount('/content/drive')`):
         --drive_val_zip         /content/drive/MyDrive/imagenet64/Imagenet64_val.zip \\
         --data_dir /content/data/imagenet64
 
+Pass --val_only to skip the (much larger, slower) train zips entirely — e.g. for
+inspect_diffusion.ipynb, which only ever reads val_images.npy / val_latents.npy:
+    python scripts/prepare_imagenet64_dataset.py \\
+        --drive_val_zip /content/drive/MyDrive/imagenet64/Imagenet64_val.zip \\
+        --data_dir /content/data/imagenet64 \\
+        --val_only
+
 Copies the zips to local disk first (a single large sequential copy is far faster
 and more reliable than random-access reads against a Drive-mounted FUSE filesystem),
 unzips them, then consolidates the per-batch pickles into two flat arrays:
@@ -112,44 +119,55 @@ def _consolidate(batch_paths: list, out_path: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Stage ImageNet64 pickled batches from Drive into a Colab runtime")
-    parser.add_argument("--drive_train_part1_zip", required=True, help="Path to Imagenet64_train_part1.zip")
-    parser.add_argument("--drive_train_part2_zip", required=True, help="Path to Imagenet64_train_part2.zip")
+    parser.add_argument("--drive_train_part1_zip", default=None, help="Path to Imagenet64_train_part1.zip (omit with --val_only)")
+    parser.add_argument("--drive_train_part2_zip", default=None, help="Path to Imagenet64_train_part2.zip (omit with --val_only)")
     parser.add_argument("--drive_val_zip", required=True, help="Path to Imagenet64_val.zip")
     parser.add_argument("--data_dir", required=True, help="Local staging/output directory (e.g. /content/data/imagenet64)")
+    parser.add_argument("--val_only", action="store_true", help="Only stage/consolidate val_images.npy, skip both train zips — for quick inspection rather than a full training run")
     parser.add_argument("--cleanup", action="store_true", help="Delete staged zips + raw pickle batches after consolidation")
     args = parser.parse_args()
+
+    if not args.val_only and (args.drive_train_part1_zip is None or args.drive_train_part2_zip is None):
+        parser.error("--drive_train_part1_zip and --drive_train_part2_zip are required unless --val_only is set")
 
     os.makedirs(args.data_dir, exist_ok=True)
     train_out = os.path.join(args.data_dir, "train_images.npy")
     val_out = os.path.join(args.data_dir, "val_images.npy")
-    if os.path.exists(train_out) and os.path.exists(val_out):
-        print(f"Already fully prepared: {train_out}, {val_out}")
+    required_outs = [val_out] if args.val_only else [train_out, val_out]
+    if all(os.path.exists(p) for p in required_outs):
+        print(f"Already fully prepared: {', '.join(required_outs)}")
         return
 
     staging = os.path.join(args.data_dir, "_staging")
     os.makedirs(staging, exist_ok=True)
 
-    local_part1 = os.path.join(staging, "Imagenet64_train_part1.zip")
-    local_part2 = os.path.join(staging, "Imagenet64_train_part2.zip")
     local_val = os.path.join(staging, "Imagenet64_val.zip")
-    _copy_if_needed(args.drive_train_part1_zip, local_part1)
-    _copy_if_needed(args.drive_train_part2_zip, local_part2)
     _copy_if_needed(args.drive_val_zip, local_val)
+    if not args.val_only:
+        local_part1 = os.path.join(staging, "Imagenet64_train_part1.zip")
+        local_part2 = os.path.join(staging, "Imagenet64_train_part2.zip")
+        _copy_if_needed(args.drive_train_part1_zip, local_part1)
+        _copy_if_needed(args.drive_train_part2_zip, local_part2)
 
     extract_dir = os.path.join(staging, "extracted")
-    _extract_zip(local_part1, extract_dir)
-    _extract_zip(local_part2, extract_dir)
     _extract_zip(local_val, extract_dir)
+    if not args.val_only:
+        _extract_zip(local_part1, extract_dir)
+        _extract_zip(local_part2, extract_dir)
 
-    train_batches = _find_batches(extract_dir, "train_data_batch")
     val_batches = _find_batches(extract_dir, "val_data")
-    if not train_batches:
-        raise FileNotFoundError(f"No train_data_batch_* files found under {extract_dir}")
     if not val_batches:
         raise FileNotFoundError(f"No val_data file found under {extract_dir}")
-    print(f"Found {len(train_batches)} train batch file(s), {len(val_batches)} val batch file(s).")
 
-    _consolidate(train_batches, train_out)
+    if args.val_only:
+        print(f"Found {len(val_batches)} val batch file(s). (--val_only: skipping train)")
+    else:
+        train_batches = _find_batches(extract_dir, "train_data_batch")
+        if not train_batches:
+            raise FileNotFoundError(f"No train_data_batch_* files found under {extract_dir}")
+        print(f"Found {len(train_batches)} train batch file(s), {len(val_batches)} val batch file(s).")
+        _consolidate(train_batches, train_out)
+
     _consolidate(val_batches, val_out)
 
     if args.cleanup:
