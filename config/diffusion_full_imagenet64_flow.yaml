@@ -33,11 +33,20 @@ weight_decay: 0.0
 max_grad_norm: 1.0
 mixed_precision: bf16   # Ampere+ native bf16, no loss-scaling needed; halves activation memory
 
+# LR schedule + EMA — the Flow Matching paper reuses the Dhariwal & Nichol (2021) ADM
+# training recipe for its ImageNet experiments, which trains at a constant LR and relies
+# on EMA (not LR decay) to stabilize sampling — see utils.build_lr_scheduler / models/ema.py
+# for the citations and reasoning behind these choices.
+lr_schedule: constant     # paper/ADM default; set to 'polynomial' + lr_poly_power/lr_warmup_steps to try decay instead
+ema_decay: 0.9999         # standard ADM/Flow-Matching value; sample from ema_state_dict, not the raw weights
+
 # Training
-# batch_size=64 is sized for a single A100 40GB at this model size (~280M params);
-# raise it if you have an 80GB card, or add grad-accumulation for a closer match
-# to the paper's effective batch of 2048. num_steps is a fraction of the paper's
+# batch_size=32 is sized for a single A100 40GB at this model size (~280M params);
+# raise it if you have an 80GB card. grad_accum_steps makes up the rest of the way
+# to the paper's effective batch of 2048 (32 * 64 = 2048) without raising peak
+# activation memory past one micro-batch. num_steps is a fraction of the paper's
 # training budget — bump it up for longer Colab/local runs, resuming with --resume.
+grad_accum_steps: 64
 num_steps: 15000
 log_interval: 100
 eval_interval: 1000

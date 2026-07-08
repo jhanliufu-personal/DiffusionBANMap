@@ -9,7 +9,7 @@ from data_utils import build_dataloaders
 from models.beta_vae import BetaVAE
 from models.unet import UNet
 from scripts.diffusion_trainer import DiffusionTrainer
-from utils import discover_device, count_model_params, make_run_tag
+from utils import discover_device, count_model_params, make_run_tag, build_lr_scheduler
 
 
 def _load_frozen_vae(cfg, device: torch.device) -> BetaVAE:
@@ -62,6 +62,7 @@ if __name__ == "__main__":
     train_loader, val_loader = build_dataloaders(cfg)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
+    scheduler = build_lr_scheduler(optimizer, cfg)
 
     wandb.init(project="diffusion_ban_map", name=cfg.experiment_name, config=vars(cfg))
 
@@ -69,7 +70,7 @@ if __name__ == "__main__":
         model=model,
         vae_model=vae,
         optimizer=optimizer,
-        scheduler=None,
+        scheduler=scheduler,
         train_dataloader=train_loader,
         val_dataloader=val_loader,
         config=cfg,

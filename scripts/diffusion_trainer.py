@@ -19,6 +19,24 @@ Config keys:
         'bf16' needs no loss scaling (safe default on Ampere+ GPUs).
         'fp16' uses a GradScaler for loss scaling — needed on older GPUs
         without native bf16 support.
+
+    grad_accum_steps: micro-batches accumulated per optimizer step (default 1).
+        Effective batch size = batch_size * grad_accum_steps. self.step / num_steps /
+        log_interval / eval_interval all count optimizer updates, not micro-batches.
+
+    ema_decay: EMA decay rate for a shadow copy of the model's parameters (default: None,
+        i.e. no EMA). Updated once per optimizer step, checkpointed under "ema_state_dict"
+        alongside the raw weights — see models/ema.py. Sample from the EMA weights instead
+        of the raw ones for meaningfully sharper/more coherent generations (this is what
+        e.g. inspect_diffusion.ipynb does when a checkpoint has ema_state_dict).
+
+Per-noise-level loss logging: train/val loss is also broken out by noise_level (each
+noise process's own [0,1]-normalized corruption fraction, see models/noise_process.py)
+into low/mid/high thirds and logged to wandb as train|val/loss_{low,mid,high}_noise, in
+addition to the overall loss. This is purely diagnostic — the scalar actually
+backpropagated (loss/train/loss) is unchanged, computed exactly as before via
+loss_per_sample(...).mean(); the buckets are just a different aggregation of the same
+per-sample losses that were already available before the final mean.
 """
 
 import os
@@ -35,9 +53,14 @@ from torch.utils.data import DataLoader
 
 from scripts.base_trainer import BaseTrainer
 from models.noise_process import DDPM, RectifiedFlow, VPSDE
+from models.ema import EMA
 
 
 class DiffusionTrainer(BaseTrainer):
+
+    # (name, lo, hi) thirds of noise_level ∈ [0, 1] — 0 = clean data, 1 = pure noise.
+    # hi on the "high" bucket is nudged past 1.0 so noise_level==1.0 samples are included.
+    _NOISE_BUCKETS = (("low", 0.0, 1 / 3), ("mid", 1 / 3, 2 / 3), ("high", 2 / 3, 1.0 + 1e-6))
 
     def __init__(
         self,
@@ -74,6 +97,16 @@ class DiffusionTrainer(BaseTrainer):
         if self.mixed_precision != 'no':
             active = "active" if self._amp_dtype is not None else f"inactive — {device.type} isn't cuda"
             print(f"Mixed precision: {self.mixed_precision} ({active})")
+
+        self.grad_accum_steps = max(1, getattr(config, 'grad_accum_steps', 1))
+        if self.grad_accum_steps > 1:
+            batch_size = getattr(config, 'batch_size', None)
+            eff_bs = f", effective batch size {batch_size * self.grad_accum_steps}" if batch_size is not None else ""
+            print(f"Gradient accumulation: {self.grad_accum_steps} micro-batches/optimizer step{eff_bs}")
+
+        ema_decay = getattr(config, 'ema_decay', None)
+        self.ema = EMA(model, decay=ema_decay) if ema_decay else None
+        print(f"EMA: decay={ema_decay}" if self.ema is not None else "EMA: disabled")
 
     @staticmethod
     def _build_amp(config, device: torch.device):
@@ -121,6 +154,10 @@ class DiffusionTrainer(BaseTrainer):
         elapsed_offset = 0.0
         if resume_ckpt_path:
             elapsed_offset = self._load_checkpoint(resume_ckpt_path)
+            if self.ema is not None and self._last_loaded_ckpt is not None \
+                    and "ema_state_dict" in self._last_loaded_ckpt:
+                self.ema.load_state_dict(self._last_loaded_ckpt["ema_state_dict"])
+                print(f"Resumed EMA shadow (step {self.ema.step})")
 
         print(f"\n=== Starting Diffusion Training ({self.config.num_steps} steps) ===\n")
         start_time = time.time()
@@ -128,26 +165,38 @@ class DiffusionTrainer(BaseTrainer):
 
         loader_iter = iter(self.train_dataloader)
 
-        while self.step < self.config.num_steps:
+        def _next_batch():
+            nonlocal loader_iter
             try:
-                batch = next(loader_iter)
+                return next(loader_iter)
             except StopIteration:
                 loader_iter = iter(self.train_dataloader)
-                batch = next(loader_iter)
+                return next(loader_iter)
 
-            loss, grad_norm = self._train_step(batch)
+        while self.step < self.config.num_steps:
+            micro_batches = [_next_batch() for _ in range(self.grad_accum_steps)]
+
+            loss, grad_norm, noise_bucket_loss = self._train_step(micro_batches)
             elapsed = elapsed_offset + (time.time() - start_time)
 
             if not self.step % self.config.log_interval:
                 print(f"Step {self.step}/{self.config.num_steps}")
-                wandb.log({"train/loss": loss, "train/grad_norm": grad_norm}, step=self.step)
+                wandb.log({
+                    "train/loss": loss,
+                    "train/grad_norm": grad_norm,
+                    **{f"train/loss_{name}_noise": v for name, v in noise_bucket_loss.items()},
+                }, step=self.step)
 
             if self.val_dataloader is not None and not self.step % self.config.eval_interval:
-                val_loss = self._evaluate()
-                wandb.log({"val/loss": val_loss}, step=self.step)
+                val_loss, val_noise_bucket_loss = self._evaluate()
+                wandb.log({
+                    "val/loss": val_loss,
+                    **{f"val/loss_{name}_noise": v for name, v in val_noise_bucket_loss.items()},
+                }, step=self.step)
                 if val_loss < self.best_val_loss:
                     self.best_val_loss = val_loss
-                    self._save_checkpoint(elapsed)
+                    extra = {"ema_state_dict": self.ema.state_dict()} if self.ema is not None else {}
+                    self._save_checkpoint(elapsed, extra=extra)
                     wandb.log({"val/best_loss": self.best_val_loss}, step=self.step)
                     print(f"  ↓ best val_loss={self.best_val_loss:.4f} → saved best_ckpt.pt")
                 self._visualize(self.step)
@@ -189,24 +238,61 @@ class DiffusionTrainer(BaseTrainer):
             z = z.masked_fill(null_mask.unsqueeze(1), 0.0)
         return z
 
+    @classmethod
+    def _update_noise_buckets(cls, sums: dict, counts: dict, loss_per: torch.Tensor, noise_level: torch.Tensor) -> None:
+        """Accumulate (sum, count) of loss_per into the low/mid/high noise_level buckets
+        defined by cls._NOISE_BUCKETS. Diagnostic bookkeeping only — loss_per/noise_level
+        should already be detached (or this is called under torch.no_grad(), as in
+        _evaluate) since these sums never participate in the backward pass."""
+        for name, lo, hi in cls._NOISE_BUCKETS:
+            mask = (noise_level >= lo) & (noise_level < hi)
+            n = int(mask.sum().item())
+            if n:
+                sums[name] += loss_per[mask].sum().item()
+                counts[name] += n
+
+    @classmethod
+    def _finalize_noise_buckets(cls, sums: dict, counts: dict) -> dict:
+        return {name: (sums[name] / counts[name] if counts[name] else float('nan'))
+                for name, _, _ in cls._NOISE_BUCKETS}
+
     # ── Single unified train / eval step ─────────────────────────────────────
 
-    def _train_step(self, batch):
-        x0, z_provided = self._unpack_batch(batch)
-        x0 = x0.to(self.device)
-        B  = x0.shape[0]
-        z  = self._get_conditioning(x0, B, z_provided)
+    def _train_step(self, micro_batches):
+        """One optimizer step, accumulating gradients over len(micro_batches) micro-batches
+        so the effective batch size is batch_size * grad_accum_steps without raising peak
+        activation memory past a single micro-batch's footprint.
 
-        t        = self.np.sample_t(B, self.device)
-        x_t, eps = self.np.corrupt(x0, t)
-        target   = self.np.get_target(x0, eps)
-        t_embed  = self.np.embed_t(t, self._embed_scale)
-
+        Also buckets the (already-computed, pre-mean) per-sample loss by noise level for
+        diagnostics — purely additional bookkeeping on a .detach()'d copy, so the scalar
+        actually backpropagated (loss_per.mean() / accum, same as before) is unaffected.
+        """
+        accum = len(micro_batches)
         self.optimizer.zero_grad()
-        with torch.autocast(device_type=self.device.type, dtype=self._amp_dtype, enabled=self._amp_dtype is not None):
-            pred = self.model(x_t, t_embed, z)
-            loss = self.np.loss(pred, target, t)
-        self.scaler.scale(loss).backward()
+        total_loss = 0.0
+        bucket_sums = {name: 0.0 for name, _, _ in self._NOISE_BUCKETS}
+        bucket_counts = {name: 0 for name, _, _ in self._NOISE_BUCKETS}
+
+        for batch in micro_batches:
+            x0, z_provided = self._unpack_batch(batch)
+            x0 = x0.to(self.device)
+            B  = x0.shape[0]
+            z  = self._get_conditioning(x0, B, z_provided)
+
+            t        = self.np.sample_t(B, self.device)
+            x_t, eps = self.np.corrupt(x0, t)
+            target   = self.np.get_target(x0, eps)
+            t_embed  = self.np.embed_t(t, self._embed_scale)
+
+            with torch.autocast(device_type=self.device.type, dtype=self._amp_dtype, enabled=self._amp_dtype is not None):
+                pred = self.model(x_t, t_embed, z)
+                loss_per = self.np.loss_per_sample(pred, target, t)
+                loss = loss_per.mean() / accum
+            self.scaler.scale(loss).backward()
+            total_loss += loss.item()
+
+            noise_level = self.np.noise_level(t)
+            self._update_noise_buckets(bucket_sums, bucket_counts, loss_per.detach(), noise_level)
 
         self.scaler.unscale_(self.optimizer)
         grad_norm = clip_grad_norm_(self.model.parameters(), self.config.max_grad_norm).item()
@@ -214,13 +300,18 @@ class DiffusionTrainer(BaseTrainer):
         self.scaler.update()
         if self.scheduler is not None:
             self.scheduler.step()
+        if self.ema is not None:
+            self.ema.update(self.model)
 
-        return loss.item(), grad_norm
+        return total_loss, grad_norm, self._finalize_noise_buckets(bucket_sums, bucket_counts)
 
     @torch.no_grad()
-    def _evaluate(self) -> float:
+    def _evaluate(self):
         self.model.eval()
         total, n = 0.0, 0
+        bucket_sums = {name: 0.0 for name, _, _ in self._NOISE_BUCKETS}
+        bucket_counts = {name: 0 for name, _, _ in self._NOISE_BUCKETS}
+
         for batch in self.val_dataloader:
             x0, z_provided = self._unpack_batch(batch)
             x0 = x0.to(self.device)
@@ -234,12 +325,16 @@ class DiffusionTrainer(BaseTrainer):
 
             with torch.autocast(device_type=self.device.type, dtype=self._amp_dtype, enabled=self._amp_dtype is not None):
                 pred = self.model(x_t, t_embed, z)
-                loss = self.np.loss(pred, target, t)
+                loss_per = self.np.loss_per_sample(pred, target, t)
+                loss = loss_per.mean()
             total += loss.item() * B
             n += B
 
+            noise_level = self.np.noise_level(t)
+            self._update_noise_buckets(bucket_sums, bucket_counts, loss_per, noise_level)
+
         self.model.train()
-        return total / n
+        return total / n, self._finalize_noise_buckets(bucket_sums, bucket_counts)
 
     # ── Visualization ─────────────────────────────────────────────────────────
 

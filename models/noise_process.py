@@ -2,8 +2,8 @@
 Noise process implementations for conditional diffusion training.
 
 Three processes, all sharing the same interface (sample_t, corrupt, get_target,
-loss, predict_x0, embed_t, vis_t_vals, dtype) so the trainer dispatches to any
-of them without branching:
+loss, loss_per_sample, noise_level, predict_x0, embed_t, vis_t_vals, dtype) so the
+trainer dispatches to any of them without branching:
 
     DDPM         — discrete ε-prediction, precomputed cosine/linear schedule
     RectifiedFlow — continuous ODE, velocity-prediction, t ∈ [0, 1]
@@ -11,6 +11,18 @@ of them without branching:
 
 z conditioning is handled externally by the UNet; these classes define only the
 forward noising process, the training target, and the loss.
+
+loss_per_sample(pred, target, t) returns the per-sample loss (shape [B], same
+weighting as loss()) instead of the batch-mean scalar — loss() is just
+loss_per_sample(...).mean(). This exists so callers can bucket the loss by noise
+level for diagnostics without changing what's actually backpropagated.
+
+noise_level(t) returns each sample's corruption fraction in [0, 1] (0 = clean
+data, 1 = pure noise) — the coefficient multiplying ε in corrupt(). This is the
+quantity to bucket/threshold on, *not* raw t: DDPM/VPSDE's t=0 is clean data
+(low noise) while RectifiedFlow's t=0 is pure noise (high noise) — see each
+process's corrupt() docstring. noise_level(t) normalizes away that difference so
+"low/mid/high noise" means the same thing regardless of noise_process.
 """
 
 import math
@@ -85,11 +97,18 @@ class DDPM:
     def get_target(self, x0: Tensor, eps: Tensor) -> Tensor:
         return eps
 
-    def loss(self, pred: Tensor, target: Tensor, t: Tensor) -> Tensor:
+    def loss_per_sample(self, pred: Tensor, target: Tensor, t: Tensor) -> Tensor:
         snr_t  = self._snr[t]
         weight = (snr_t.clamp(max=self.min_snr_gamma) / snr_t).detach()
         loss_per = F.mse_loss(pred, target, reduction='none').mean(dim=[1, 2, 3])
-        return (loss_per * weight).mean()
+        return loss_per * weight
+
+    def loss(self, pred: Tensor, target: Tensor, t: Tensor) -> Tensor:
+        return self.loss_per_sample(pred, target, t).mean()
+
+    def noise_level(self, t: Tensor) -> Tensor:
+        """Fraction of x_t that is noise: √(1-ᾱ_t) — 0 at t=0 (clean), →1 as t→T."""
+        return self._sqrt_1macp[t]
 
     def predict_x0(self, x_t: Tensor, eps_pred: Tensor, t: Tensor) -> Tensor:
         sqrt_a   = self._sqrt_acp[t][:, None, None, None].clamp(min=1e-8)
@@ -131,8 +150,16 @@ class RectifiedFlow:
     def get_target(self, x0: Tensor, eps: Tensor) -> Tensor:
         return x0 - eps
 
+    def loss_per_sample(self, pred: Tensor, target: Tensor, t: Tensor) -> Tensor:
+        return F.mse_loss(pred, target, reduction='none').mean(dim=[1, 2, 3])
+
     def loss(self, pred: Tensor, target: Tensor, t: Tensor) -> Tensor:
-        return F.mse_loss(pred, target)
+        return self.loss_per_sample(pred, target, t).mean()
+
+    def noise_level(self, t: Tensor) -> Tensor:
+        """Fraction of x_t that is noise: coefficient on ε is (1-t) — note this is
+        *inverted* relative to DDPM/VPSDE's t: here t=0 is pure noise, t=1 is clean data."""
+        return 1.0 - t
 
     def predict_x0(self, x_t: Tensor, v_pred: Tensor, t: Tensor) -> Tensor:
         """x0 = x_t + (1-t)·v  (exact inversion when v = v*)."""
@@ -206,13 +233,20 @@ class VPSDE:
     def get_target(self, x0: Tensor, eps: Tensor) -> Tensor:
         return eps
 
-    def loss(self, pred: Tensor, target: Tensor, t: Tensor) -> Tensor:
+    def loss_per_sample(self, pred: Tensor, target: Tensor, t: Tensor) -> Tensor:
+        loss_per = F.mse_loss(pred, target, reduction='none').mean(dim=[1, 2, 3])
         if self.min_snr_gamma > 0.0:
             snr_t  = self.snr(t)
             weight = (snr_t.clamp(max=self.min_snr_gamma) / snr_t).detach()
-            loss_per = F.mse_loss(pred, target, reduction='none').mean(dim=[1, 2, 3])
-            return (loss_per * weight).mean()
-        return F.mse_loss(pred, target)
+            return loss_per * weight
+        return loss_per
+
+    def loss(self, pred: Tensor, target: Tensor, t: Tensor) -> Tensor:
+        return self.loss_per_sample(pred, target, t).mean()
+
+    def noise_level(self, t: Tensor) -> Tensor:
+        """Fraction of x_t that is noise: σ(t) — 0 at t=0 (clean), →1 as t→1."""
+        return self.sigma(t)
 
     def predict_x0(self, x_t: Tensor, eps_pred: Tensor, t: Tensor) -> Tensor:
         ct = self.c(t)[:, None, None, None].clamp(min=1e-8)

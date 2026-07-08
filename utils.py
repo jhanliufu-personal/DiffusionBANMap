@@ -47,6 +47,48 @@ def count_model_params(model: torch.nn.Module) -> None:
     print(f"Model has {total_params:,} total parameters ({trainable_params:,} trainable)")
 
 
+def build_lr_scheduler(optimizer: torch.optim.Optimizer, cfg) -> Optional[torch.optim.lr_scheduler.LRScheduler]:
+    """Build the LR schedule named by cfg.lr_schedule (default 'constant' — no scheduler,
+    i.e. returns None and DiffusionTrainer just leaves the optimizer's LR untouched).
+
+    The Flow Matching paper (Lipman et al. 2023) reuses the Dhariwal & Nichol (2021) ADM
+    U-Net + training recipe for its ImageNet experiments, which — per that lineage's usual
+    convention — trains at a constant LR and relies on EMA (models/ema.py, decay 0.9999)
+    rather than LR decay for stabilization; that's why 'constant' is this project's default
+    for the imagenet64 flow config. The Flow Matching paper's own Table 3 also lists
+    'polynomial decay' for some of its other experiments, so that option is implemented
+    here too in case you want to compare against it directly.
+
+    cfg.lr_schedule:      'constant' (default) | 'polynomial'
+    cfg.lr_warmup_steps:  linear warmup length in optimizer steps (default 0)
+    cfg.lr_poly_power:    polynomial decay power (default 1.0 — linear decay to 0 by num_steps)
+    """
+    schedule = getattr(cfg, 'lr_schedule', 'constant')
+    warmup_steps = getattr(cfg, 'lr_warmup_steps', 0)
+
+    if schedule == 'constant':
+        base_scheduler = None
+    elif schedule == 'polynomial':
+        power = getattr(cfg, 'lr_poly_power', 1.0)
+        base_scheduler = torch.optim.lr_scheduler.PolynomialLR(
+            optimizer, total_iters=cfg.num_steps - warmup_steps, power=power,
+        )
+    else:
+        raise ValueError(f"Unknown lr_schedule: {schedule!r}")
+
+    if warmup_steps <= 0:
+        return base_scheduler
+
+    warmup = torch.optim.lr_scheduler.LinearLR(
+        optimizer, start_factor=1e-3, end_factor=1.0, total_iters=warmup_steps,
+    )
+    if base_scheduler is None:
+        return warmup
+    return torch.optim.lr_scheduler.SequentialLR(
+        optimizer, schedulers=[warmup, base_scheduler], milestones=[warmup_steps],
+    )
+
+
 def compute_gaussian_kl(z_mean: torch.Tensor, z_logvar: torch.Tensor) -> torch.Tensor:
     """
     Compute KL divergence between input Gaussian and Standard Normal.

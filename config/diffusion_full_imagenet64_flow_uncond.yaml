@@ -1,5 +1,5 @@
 experiment_name: diffusion_full_imagenet64_flow_uncond
-output_dir: outputs/diffusion_full_imagenet64_flow_uncond
+output_dir: outputs/diffusion_full_imagenet64_flow_grad_accum_ema
 
 # Data — run scripts/prepare_imagenet64_dataset.py first (expects
 # <data_dir>/train_images.npy and <data_dir>/val_images.npy already consolidated).
@@ -33,11 +33,15 @@ weight_decay: 0.0
 max_grad_norm: 1.0
 mixed_precision: bf16   # Ampere+ native bf16, no loss-scaling needed; halves activation memory
 
+lr_schedule: constant
+ema_decay: 0.9999
+
 # Training
 # batch_size=64 is sized for a single A100 40GB at this model size (~280M params);
 # raise it if you have an 80GB card, or add grad-accumulation for a closer match
 # to the paper's effective batch of 2048. num_steps is a fraction of the paper's
 # training budget — bump it up for longer Colab/local runs, resuming with --resume.
-num_steps: 200000
+grad_accum_steps: 64
+num_steps: 15000
 log_interval: 100
 eval_interval: 1000
