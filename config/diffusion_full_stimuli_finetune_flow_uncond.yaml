@@ -1,0 +1,45 @@
+experiment_name: diffusion_full_stimuli_finetune_flow_uncond
+output_dir: outputs/diffusion_full_stimuli_finetune_flow_uncond
+
+# Data
+dataset_type: stimuli
+data_dir: data/15901Stimuli
+train_split: 0.9
+batch_size: 32
+
+# UNet — matches the ADM ImageNet-64 config used by the original Flow Matching
+# paper (Lipman et al. 2023) for its ImageNet experiments.
+in_channels: 3
+image_size: 64
+model_channels: 192
+channel_mult: [1, 2, 3, 4]
+num_res_blocks: 3
+attention_resolutions: [32, 16, 8]
+num_head_channels: 64
+dropout: 0.1
+
+# Diffusion / flow matching
+unconditional: true
+noise_process: flow
+num_timesteps: 1000        # sinusoidal embedding scale only; flow itself uses t in [0,1]
+cfg_uncond_prob: 0.0
+latent_dim: 1               # unused (z is a zero vector) since unconditional: true
+
+# Optimizer
+lr: 1.0e-4
+weight_decay: 0.0
+max_grad_norm: 1.0
+mixed_precision: bf16
+
+lr_schedule: constant
+ema_decay: 0.9999
+
+# Training
+grad_accum_steps: 4
+num_steps: 5000
+log_interval: 100
+eval_interval: 1000
+# ImageNet64 uncond flow model, no grad accumulation (grad_accum_steps=1, predates that
+# feature), trained for 15000 steps — unconditional sampling from this checkpoint alone
+# produces incoherent objects and unrealistic layouts; finetuning here is expected to fix that.
+resume_ckpt_path: outputs/diffusion_full_imagenet64_flow_h64_mc192_ch1x2x3x4_T1000_flow_uncond_z1/checkpoints/best_ckpt.pt
