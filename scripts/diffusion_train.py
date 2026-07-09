@@ -35,6 +35,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, required=True)
     parser.add_argument("--resume", type=str, default=None, help="Checkpoint to resume from")
+    parser.add_argument("--run_name", type=str, default=None, help="Appended to cfg.experiment_name for the wandb run name")
+    parser.add_argument("--notes", type=str, default=None, help="wandb run notes")
     args = parser.parse_args()
 
     with open(args.config) as f:
@@ -44,7 +46,17 @@ if __name__ == "__main__":
     device = torch.device(discover_device())
 
     unconditional = getattr(cfg, "unconditional", False)
-    vae = None if unconditional else _load_frozen_vae(cfg, device)
+    if unconditional:
+        vae = None
+        print("Unconditional — no VAE, z is a zero vector")
+    elif hasattr(cfg, "betavae_config_path"):
+        vae = _load_frozen_vae(cfg, device)
+    else:
+        # Conditional, but no VAE configured — the dataloader is expected to already
+        # provide precomputed latents (e.g. AlexNet-fc6-PCA, see
+        # notebooks/alexnet_pca_latents.ipynb) as (image, latent) pairs.
+        vae = None
+        print("Conditional on precomputed latents — no VAE to load, expecting (image, latent) pairs from the dataloader")
 
     model = UNet(
         in_channels=cfg.in_channels,
@@ -64,7 +76,8 @@ if __name__ == "__main__":
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
     scheduler = build_lr_scheduler(optimizer, cfg)
 
-    wandb.init(project="diffusion_ban_map", name=cfg.experiment_name, config=vars(cfg))
+    run_name = f"{cfg.experiment_name}_{args.run_name}" if args.run_name else cfg.experiment_name
+    wandb.init(project="diffusion_ban_map", name=run_name, notes=args.notes, config=vars(cfg))
 
     trainer = DiffusionTrainer(
         model=model,
