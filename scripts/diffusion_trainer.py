@@ -161,9 +161,10 @@ class DiffusionTrainer(BaseTrainer):
 
         elapsed_offset = 0.0
         if resume_ckpt_path:
-            elapsed_offset = self._load_checkpoint(resume_ckpt_path)
+            reset_step = getattr(self.config, 'reset_step_on_resume', False)
+            elapsed_offset = self._load_checkpoint(resume_ckpt_path, reset_step=reset_step)
             if self.ema is not None and self._last_loaded_ckpt is not None \
-                    and "ema_state_dict" in self._last_loaded_ckpt:
+                    and "ema_state_dict" in self._last_loaded_ckpt and not reset_step:
                 self.ema.load_state_dict(self._last_loaded_ckpt["ema_state_dict"])
                 print(f"Resumed EMA shadow (step {self.ema.step})")
 

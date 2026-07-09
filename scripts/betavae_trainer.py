@@ -30,7 +30,8 @@ class BetaVAETrainer(BaseTrainer):
     def train(self, resume_ckpt_path: Optional[str] = None):
         elapsed_time_offset = 0.0
         if resume_ckpt_path:
-            elapsed_time_offset = self._load_checkpoint(resume_ckpt_path)
+            reset_step = getattr(self.config, 'reset_step_on_resume', False)
+            elapsed_time_offset = self._load_checkpoint(resume_ckpt_path, reset_step=reset_step)
 
         print(f"\n=== Starting β-VAE Training ({self.config.num_epochs} epochs) ===\n")
         self.start_time = time.time()
