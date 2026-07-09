@@ -151,6 +151,14 @@ class DiffusionTrainer(BaseTrainer):
     # ── Training loop ─────────────────────────────────────────────────────────
 
     def train(self, resume_ckpt_path: Optional[str] = None):
+        # Model must be on self.device *before* optimizer state is loaded below:
+        # Optimizer.load_state_dict casts each loaded tensor (exp_avg, exp_avg_sq, step)
+        # to the *current* param.device at call time, ignoring torch.load's map_location.
+        # Loading while the model is still on CPU pins that state to CPU, which later
+        # mismatches the CUDA grads once the model is moved — "Expected all tensors to be
+        # on the same device" inside torch._foreach_lerp_ in Adam's step.
+        self.model = self.model.to(self.device).train()
+
         elapsed_offset = 0.0
         if resume_ckpt_path:
             elapsed_offset = self._load_checkpoint(resume_ckpt_path)
@@ -161,7 +169,6 @@ class DiffusionTrainer(BaseTrainer):
 
         print(f"\n=== Starting Diffusion Training ({self.config.num_steps} steps) ===\n")
         start_time = time.time()
-        self.model = self.model.to(self.device).train()
         if self.ema is not None:
             self.ema.to(self.device)
 
