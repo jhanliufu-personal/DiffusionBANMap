@@ -1,3 +1,4 @@
+import os
 import argparse
 import types
 
@@ -84,7 +85,7 @@ if __name__ == "__main__":
     scheduler = build_lr_scheduler(optimizer, cfg)
 
     run_name = f"{cfg.experiment_name}_{args.run_name}" if args.run_name else cfg.experiment_name
-    wandb.login()
+    wandb.login(key=os.environ["WANDB_API_KEY"])
     wandb.init(project="diffusion_ban_map", name=run_name, notes=args.notes, config=vars(cfg))
 
     trainer = DiffusionTrainer(

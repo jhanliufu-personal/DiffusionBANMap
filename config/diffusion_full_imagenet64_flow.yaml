@@ -6,7 +6,7 @@ output_dir: outputs/diffusion_full_imagenet64_flow
 # On Colab, point this at local runtime disk (e.g. /content/data/imagenet64),
 # not the Drive mount — the .npy is memory-mapped and needs fast random access.
 dataset_type: imagenet64
-data_dir: /content/data/imagenet64
+data_dir: data/imagenet64
 batch_size: 32
 
 # UNet — matches the ADM ImageNet-64 config used by the original Flow Matching
@@ -47,6 +47,6 @@ ema_decay: 0.9999         # standard ADM/Flow-Matching value; sample from ema_st
 # activation memory past one micro-batch. num_steps is a fraction of the paper's
 # training budget — bump it up for longer Colab/local runs, resuming with --resume.
 grad_accum_steps: 64
-num_steps: 15000
+num_steps: 20000
 log_interval: 100
-eval_interval: 1000
+eval_interval: 400
