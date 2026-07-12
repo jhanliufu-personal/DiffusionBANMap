@@ -258,6 +258,7 @@ def build_imagenet64_dataloaders(
     seed: int = 42,
     shuffle_train: bool = True,
     latent_dim: Optional[int] = None,
+    unconditional: bool = False,
 ) -> Tuple[DataLoader, DataLoader]:
     """Return (train_dl, val_dl) over the pre-downsampled ImageNet64 benchmark
     (van den Oord et al. pickled-batch format, consolidated into flat train_images.npy /
@@ -271,8 +272,10 @@ def build_imagenet64_dataloaders(
     data_dir (written by notebooks/alexnet_pca_latents.ipynb, row-aligned with
     train_images.npy / val_images.npy — the dim suffix lets multiple PCA dimensionalities
     coexist in the same data_dir), batches become (image, latent) tuples for
-    precomputed-latent conditioning instead of plain image tensors — no config flag needed
-    beyond latent_dim, this is detected purely from what's on disk.
+    precomputed-latent conditioning instead of plain image tensors — this is detected
+    purely from what's on disk, unless unconditional=True, in which case latent detection
+    is skipped entirely so leftover latents files from a reused data_dir can never leak
+    into an unconditional run.
 
     shuffle_train=False makes train_dl unshuffled with no dropped batch (val_dl already
     behaves this way) — for a full, order-preserving pass (row i in == row i out), e.g.
@@ -285,16 +288,20 @@ def build_imagenet64_dataloaders(
             f"Expected {train_path} and {val_path} — run scripts/prepare_imagenet64_dataset.py first"
         )
 
-    latents_suffix = f"latents_z{latent_dim}.npy" if latent_dim is not None else "latents.npy"
-    train_latents_path = os.path.join(data_dir, f"train_{latents_suffix}")
-    val_latents_path = os.path.join(data_dir, f"val_{latents_suffix}")
-    train_latents_path = train_latents_path if os.path.exists(train_latents_path) else None
-    val_latents_path = val_latents_path if os.path.exists(val_latents_path) else None
-    if (train_latents_path is None) != (val_latents_path is None):
-        raise FileNotFoundError(
-            f"Found latents for one split but not the other in {data_dir} — expected both "
-            f"train_{latents_suffix} and val_{latents_suffix}, or neither."
-        )
+    if unconditional:
+        train_latents_path = None
+        val_latents_path = None
+    else:
+        latents_suffix = f"latents_z{latent_dim}.npy" if latent_dim is not None else "latents.npy"
+        train_latents_path = os.path.join(data_dir, f"train_{latents_suffix}")
+        val_latents_path = os.path.join(data_dir, f"val_{latents_suffix}")
+        train_latents_path = train_latents_path if os.path.exists(train_latents_path) else None
+        val_latents_path = val_latents_path if os.path.exists(val_latents_path) else None
+        if (train_latents_path is None) != (val_latents_path is None):
+            raise FileNotFoundError(
+                f"Found latents for one split but not the other in {data_dir} — expected both "
+                f"train_{latents_suffix} and val_{latents_suffix}, or neither."
+            )
 
     train_dl = DataLoader(
         _ImageNet64ArrayDataset(train_path, image_size, train_latents_path),
@@ -414,6 +421,7 @@ def build_dataloaders(cfg) -> Tuple[DataLoader, DataLoader]:
             image_size=h,
             batch_size=cfg.batch_size,
             latent_dim=getattr(cfg, "latent_dim", None),
+            unconditional=getattr(cfg, "unconditional", False),
         )
     else:
         return build_face_dataloaders(
