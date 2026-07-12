@@ -1,0 +1,29 @@
+# Core deep learning
+# For CUDA builds, install torch/torchvision first from the matching wheel index, e.g.:
+#   pip install torch>=2.2.0 torchvision>=0.17.0 --index-url https://download.pytorch.org/whl/cu118
+torch>=2.2.0
+torchvision>=0.17.0
+
+# Diffusion models
+diffusers>=0.27.0
+transformers>=4.40.0
+accelerate>=0.29.0
+
+# Scientific computing
+numpy>=1.26.0
+scipy>=1.13.0
+scikit-learn>=1.4.0
+joblib>=1.4.0
+
+# Visualization
+matplotlib>=3.8.0
+pillow>=10.3.0
+
+# Data / config
+pyyaml>=6.0.0
+h5py>=3.16.0
+
+# Utilities
+tqdm>=4.66.0
+ipykernel>=6.29.0
+wandb>=0.26.1

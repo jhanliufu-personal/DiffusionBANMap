@@ -43,11 +43,18 @@ if __name__ == "__main__":
         cfg = types.SimpleNamespace(**yaml.safe_load(f))
 
     cfg.output_dir = f"{cfg.output_dir}_{make_run_tag(cfg)}"
+
+    resume_ckpt_path = args.resume or getattr(cfg, "resume_ckpt_path", None)
+    if resume_ckpt_path:
+        print(f"Will resume training from {resume_ckpt_path}")
+
     device = torch.device(discover_device())
+    print(f"Device: {device}")
 
     unconditional = getattr(cfg, "unconditional", False)
     if unconditional:
         vae = None
+        print("Train for unconditional generation")
         print("Unconditional — no VAE, z is a zero vector")
     elif hasattr(cfg, "betavae_config_path"):
         vae = _load_frozen_vae(cfg, device)
@@ -77,6 +84,7 @@ if __name__ == "__main__":
     scheduler = build_lr_scheduler(optimizer, cfg)
 
     run_name = f"{cfg.experiment_name}_{args.run_name}" if args.run_name else cfg.experiment_name
+    wandb.login()
     wandb.init(project="diffusion_ban_map", name=run_name, notes=args.notes, config=vars(cfg))
 
     trainer = DiffusionTrainer(
@@ -89,4 +97,4 @@ if __name__ == "__main__":
         config=cfg,
         device=device,
     )
-    trainer.train(resume_ckpt_path=args.resume)
+    trainer.train(resume_ckpt_path=resume_ckpt_path)
