@@ -25,7 +25,7 @@ unconditional: false
 noise_process: flow
 num_timesteps: 1000        # sinusoidal embedding scale only; flow itself uses t in [0,1]
 cfg_uncond_prob: 0.1
-latent_dim: 200              # AlexNet-fc6-PCA latents (see notebooks/alexnet_pca_latents.ipynb)
+latent_dim: 50              # AlexNet-fc6-PCA latents (see notebooks/alexnet_pca_latents.ipynb)
 
 # Optimizer
 lr: 1.0e-4
