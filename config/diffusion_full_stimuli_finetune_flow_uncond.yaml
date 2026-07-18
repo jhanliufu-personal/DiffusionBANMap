@@ -26,7 +26,7 @@ cfg_uncond_prob: 0.0
 latent_dim: 1               # unused (z is a zero vector) since unconditional: true
 
 # Optimizer
-lr: 1.0e-4
+lr: 1.0e-5
 weight_decay: 0.0
 max_grad_norm: 1.0
 mixed_precision: bf16
@@ -35,10 +35,10 @@ lr_schedule: constant
 ema_decay: 0.9999
 
 # Training
-grad_accum_steps: 12
-num_steps: 10000
+grad_accum_steps: 8
+num_steps: 5000
 log_interval: 100
-eval_interval: 400
+eval_interval: 200
 # ImageNet64 uncond flow model, no grad accumulation (grad_accum_steps=1, predates that
 # feature), trained for 15000 steps — unconditional sampling from this checkpoint alone
 # produces incoherent objects and unrealistic layouts; finetuning here is expected to fix that.
