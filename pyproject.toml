@@ -28,6 +28,7 @@ dependencies = [
     "ipykernel>=6.29.0",
     "wandb>=0.26.1",
     "h5py>=3.16.0",
+    "hf-transfer>=0.1.9",
 ]
 
 [tool.hatch.build.targets.wheel]
