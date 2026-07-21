@@ -321,6 +321,44 @@ def build_imagenet64_dataloaders(
     return train_dl, val_dl
 
 
+def build_imagenet64_val_dataloader(
+    data_dir: str,
+    image_size: int = 64,
+    batch_size: int = 64,
+    num_workers: int = 4,
+    latent_dim: Optional[int] = None,
+    unconditional: bool = False,
+) -> DataLoader:
+    """Return just the val_dl half of build_imagenet64_dataloaders, without requiring
+    train_images.npy to exist — for evaluation-only use (e.g. FID) that never touches the
+    training split and so shouldn't need it staged/present on disk either.
+    """
+    val_path = os.path.join(data_dir, "val_images.npy")
+    if not os.path.exists(val_path):
+        raise FileNotFoundError(
+            f"Expected {val_path} — run scripts/prepare_imagenet64_dataset.py first"
+        )
+
+    if unconditional:
+        val_latents_path = None
+    else:
+        latents_suffix = f"latents_z{latent_dim}.npy" if latent_dim is not None else "latents.npy"
+        val_latents_path = os.path.join(data_dir, f"val_{latents_suffix}")
+        val_latents_path = val_latents_path if os.path.exists(val_latents_path) else None
+
+    val_dl = DataLoader(
+        _ImageNet64ArrayDataset(val_path, image_size, val_latents_path),
+        batch_size=batch_size, shuffle=False, num_workers=num_workers,
+        pin_memory=True,
+    )
+    conditioning = "precomputed latents" if val_latents_path else "none (unconditional / on-the-fly VAE)"
+    print(
+        f"ImageNet64 (val-only) — Val: {len(val_dl.dataset):,} images ({len(val_dl)} batches) | "
+        f"conditioning: {conditioning}"
+    )
+    return val_dl
+
+
 def build_encode_dataloader(
     data_dir: str,
     image_size: int = 224,
