@@ -132,7 +132,11 @@ def sta_cross_val_pref_only(
             resp_raw[ind_train],
             params[ind_train, :],
             method=method,
-            normalize=False,  # already normalized above
+            normalize=True,  # re-normalized per fold, matching STA_sub_cross_val_pref_only.m's
+                              # call into analysis_STA with toNorm defaulting to true -- the
+                              # per-dim norm is computed from the training subset only, distinct
+                              # from params_norm above (which uses the full stimulus set and is
+                              # only used for projecting, not for fitting the axis itself)
             alpha=alpha
         )
 
@@ -181,16 +185,16 @@ def compute_orthogonal_variance(
     if n_components_pca is None:
         n_components_pca = min(n_features - 1, n_stimuli)
 
-    # Preferred axis
-    proj_pref = params_norm @ sta
+    # Preferred axis -- project onto the unit-normalized sta, matching
+    # STA_figure_clean.m's `value_sta_prj = (sta/norm(sta))*para'`
+    sta_normalized = sta / np.linalg.norm(sta)
+    proj_pref = params_norm @ sta_normalized
     coeffs_pref = np.polyfit(proj_pref, resp_raw, 1)
     pred_pref = np.polyval(coeffs_pref, proj_pref)
     ev_pref = compute_explained_variance(resp_raw, pred_pref)
 
     # Principal orthogonal axis
-    sta_normalized = sta / np.linalg.norm(sta)
-    projection_scalars = params_norm @ sta_normalized
-    params_sub_sta = params_norm - np.outer(projection_scalars, sta_normalized)
+    params_sub_sta = params_norm - np.outer(proj_pref, sta_normalized)
 
     n_components_to_fit = min(n_components_pca, n_stimuli, n_features)
     pca_orth = PCA(n_components=n_components_to_fit)
