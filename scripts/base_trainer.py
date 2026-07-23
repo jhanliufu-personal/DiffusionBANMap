@@ -7,7 +7,7 @@ from typing import Optional
 class BaseTrainer:
     """Shared machinery: output dirs, config persistence, checkpoint save/load."""
 
-    def __init__(self, model, optimizer, scheduler, config, device):
+    def __init__(self, model, optimizer, scheduler, config, device, rank: int = 0, world_size: int = 1):
         self.model = model
         self.optimizer = optimizer
         self.scheduler = scheduler
@@ -15,18 +15,29 @@ class BaseTrainer:
         self.device = torch.device(device)
         self.step = 0
         self._last_loaded_ckpt: Optional[dict] = None
+        self.rank = rank
+        self.world_size = world_size
+        self.is_main = rank == 0
 
         self.ckpt_dir = os.path.join(config.output_dir, 'checkpoints')
         self.vis_dir = os.path.join(config.output_dir, 'visualizations')
-        os.makedirs(self.ckpt_dir, exist_ok=True)
-        os.makedirs(self.vis_dir, exist_ok=True)
 
-        with open(os.path.join(config.output_dir, 'config.json'), 'w') as f:
-            json.dump(vars(config), f, indent=2)
-
-        print(f"Trainer initialized. Output directory: {config.output_dir}")
+        # Only rank 0 touches disk here — every rank computed the same output_dir/paths
+        # independently (deterministic from config), but N processes concurrently
+        # creating dirs / writing config.json is a pointless race. Other ranks wait at
+        # the barrier so they can't read ckpt_dir before rank 0 has created it.
+        if self.is_main:
+            os.makedirs(self.ckpt_dir, exist_ok=True)
+            os.makedirs(self.vis_dir, exist_ok=True)
+            with open(os.path.join(config.output_dir, 'config.json'), 'w') as f:
+                json.dump(vars(config), f, indent=2)
+            print(f"Trainer initialized. Output directory: {config.output_dir}")
+        if self.world_size > 1:
+            torch.distributed.barrier()
 
     def _save_checkpoint(self, elapsed_time: float, extra: dict = {}, filename: str = "best_ckpt.pt"):
+        if not self.is_main:
+            return
         ckpt = {
             "step": self.step,
             "model_state_dict": self.model.state_dict(),

@@ -5,12 +5,16 @@ import types
 import wandb
 import yaml
 import torch
+import torch.multiprocessing as mp
 
 from data_utils import build_dataloaders
 from models.beta_vae import BetaVAE
 from models.unet import UNet
 from scripts.diffusion_trainer import DiffusionTrainer
-from utils import discover_device, count_model_params, make_run_tag, build_lr_scheduler
+from utils import (
+    discover_device, count_model_params, make_run_tag, build_lr_scheduler,
+    setup_distributed, cleanup_distributed,
+)
 
 
 def _load_frozen_vae(cfg, device: torch.device) -> BetaVAE:
@@ -32,13 +36,27 @@ def _load_frozen_vae(cfg, device: torch.device) -> BetaVAE:
     return vae
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, required=True)
-    parser.add_argument("--resume", type=str, default=None, help="Checkpoint to resume from")
-    parser.add_argument("--run_name", type=str, default=None, help="Appended to cfg.experiment_name for the wandb run name")
-    parser.add_argument("--notes", type=str, default=None, help="wandb run notes")
-    args = parser.parse_args()
+def main_worker(rank: int, world_size: int, args: argparse.Namespace) -> None:
+    """Entry point for one training process. rank/world_size are (0, 1) for plain
+    single-GPU/CPU/MPS runs; for multi-GPU runs this is spawned once per visible CUDA
+    device by __main__ below, each pinned to its own GPU via DDP."""
+    is_main = rank == 0
+    if world_size > 1:
+        try:
+            device = setup_distributed(rank, world_size)
+        except Exception as e:
+            print(f"[GPU {rank}] FAILED to join process group: {e}", flush=True)
+            raise
+        print(f"[GPU {rank}] {torch.cuda.get_device_name(device)} — joined process group successfully", flush=True)
+        # Every rank must reach this barrier for it to pass — if it hangs, some rank's
+        # setup_distributed above either failed silently or never got here at all.
+        torch.distributed.barrier()
+        if is_main:
+            print(f"All {world_size} GPUs launched successfully — starting DDP training\n")
+    else:
+        device = torch.device(discover_device())
+    if is_main:
+        print(f"Device: {device}" + (f" | distributed: {world_size} GPUs (DDP)" if world_size > 1 else ""))
 
     with open(args.config) as f:
         cfg = types.SimpleNamespace(**yaml.safe_load(f))
@@ -46,17 +64,15 @@ if __name__ == "__main__":
     cfg.output_dir = f"{cfg.output_dir}_{make_run_tag(cfg)}"
 
     resume_ckpt_path = args.resume or getattr(cfg, "resume_ckpt_path", None)
-    if resume_ckpt_path:
+    if resume_ckpt_path and is_main:
         print(f"Will resume training from {resume_ckpt_path}")
-
-    device = torch.device(discover_device())
-    print(f"Device: {device}")
 
     unconditional = getattr(cfg, "unconditional", False)
     if unconditional:
         vae = None
-        print("Train for unconditional generation")
-        print("Unconditional — no VAE, z is a zero vector")
+        if is_main:
+            print("Train for unconditional generation")
+            print("Unconditional — no VAE, z is a zero vector")
     elif hasattr(cfg, "betavae_config_path"):
         vae = _load_frozen_vae(cfg, device)
     else:
@@ -64,7 +80,8 @@ if __name__ == "__main__":
         # provide precomputed latents (e.g. AlexNet-fc6-PCA, see
         # notebooks/alexnet_pca_latents.ipynb) as (image, latent) pairs.
         vae = None
-        print("Conditional on precomputed latents — no VAE to load, expecting (image, latent) pairs from the dataloader")
+        if is_main:
+            print("Conditional on precomputed latents — no VAE to load, expecting (image, latent) pairs from the dataloader")
 
     model = UNet(
         in_channels=cfg.in_channels,
@@ -77,16 +94,18 @@ if __name__ == "__main__":
         num_head_channels=getattr(cfg, "num_head_channels", 64),
         latent_dim=cfg.latent_dim,
     )
-    count_model_params(model)
+    if is_main:
+        count_model_params(model)
 
-    train_loader, val_loader = build_dataloaders(cfg)
+    train_loader, val_loader = build_dataloaders(cfg, rank=rank, world_size=world_size)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
     scheduler = build_lr_scheduler(optimizer, cfg)
 
-    run_name = f"{cfg.experiment_name}_{args.run_name}" if args.run_name else cfg.experiment_name
-    wandb.login(key=os.environ["WANDB_API_KEY"])
-    wandb.init(project="diffusion_ban_map", name=run_name, notes=args.notes, config=vars(cfg))
+    if is_main:
+        run_name = f"{cfg.experiment_name}_{args.run_name}" if args.run_name else cfg.experiment_name
+        wandb.login(key=os.environ["WANDB_API_KEY"])
+        wandb.init(project="diffusion_ban_map", name=run_name, notes=args.notes, config=vars(cfg))
 
     trainer = DiffusionTrainer(
         model=model,
@@ -97,5 +116,30 @@ if __name__ == "__main__":
         val_dataloader=val_loader,
         config=cfg,
         device=device,
+        rank=rank,
+        world_size=world_size,
     )
     trainer.train(resume_ckpt_path=resume_ckpt_path)
+
+    if world_size > 1:
+        cleanup_distributed()
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=str, required=True)
+    parser.add_argument("--resume", type=str, default=None, help="Checkpoint to resume from")
+    parser.add_argument("--run_name", type=str, default=None, help="Appended to cfg.experiment_name for the wandb run name")
+    parser.add_argument("--notes", type=str, default=None, help="wandb run notes")
+    args = parser.parse_args()
+
+    # Auto-detect all visible GPUs and train on all of them via DDP — no torchrun needed,
+    # `python scripts/diffusion_train.py --config ...` alone picks up every GPU on the
+    # machine. Falls back to the previous single-process path (device via discover_device,
+    # cuda/mps/cpu) when there's 0 or 1 GPU, so single-GPU/CPU/MPS runs are unaffected.
+    num_gpus = torch.cuda.device_count()
+    if num_gpus > 1:
+        print(f"Found {num_gpus} GPUs — launching distributed data-parallel training")
+        mp.spawn(main_worker, args=(num_gpus, args), nprocs=num_gpus, join=True)
+    else:
+        main_worker(0, 1, args)

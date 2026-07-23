@@ -3,8 +3,10 @@ Utility functions for β-VAE training and evaluation.
 Implements the exact loss function from Higgins et al. (2017) and training utilities.
 """
 
+import os
 import math
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 from typing import Tuple, Dict, Any, Literal, Optional, List
 import numpy as np
@@ -39,6 +41,24 @@ def discover_device() -> Literal["cuda", "mps", "cpu"]:
     else:
         device = "cpu"
     return device
+
+
+def setup_distributed(rank: int, world_size: int, port: str = "29500") -> torch.device:
+    """Initialize a single-machine, multi-GPU NCCL process group for rank `rank` of
+    `world_size`, and pin this process to its own GPU. Used for single-node DDP training
+    launched via torch.multiprocessing.spawn (see scripts/diffusion_train.py) rather than
+    torchrun, so `python scripts/diffusion_train.py` alone picks up every visible GPU.
+    """
+    os.environ.setdefault("MASTER_ADDR", "localhost")
+    os.environ.setdefault("MASTER_PORT", port)
+    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+    torch.cuda.set_device(rank)
+    return torch.device("cuda", rank)
+
+
+def cleanup_distributed() -> None:
+    if dist.is_available() and dist.is_initialized():
+        dist.destroy_process_group()
 
 
 def count_model_params(model: torch.nn.Module) -> None:

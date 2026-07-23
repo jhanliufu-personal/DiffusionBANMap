@@ -41,8 +41,12 @@ per-sample losses that were already available before the final mean.
 
 import os
 import time
+import contextlib
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
+from torch.nn.parallel import DistributedDataParallel
+from torch.utils.data.distributed import DistributedSampler
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -72,14 +76,19 @@ class DiffusionTrainer(BaseTrainer):
         val_dataloader: Optional[DataLoader],
         config,
         device: torch.device,
+        rank: int = 0,
+        world_size: int = 1,
     ):
-        super().__init__(model, optimizer, scheduler, config, device)
+        super().__init__(model, optimizer, scheduler, config, device, rank=rank, world_size=world_size)
         self.train_dataloader = train_dataloader
         self.val_dataloader = val_dataloader
         self.best_val_loss = float("inf")
+        # Set in train(): self.model stays the raw module (checkpoint/EMA keys stay clean
+        # and unprefixed) while self.ddp_model is what forward passes actually go through.
+        self.ddp_model = None
 
         self.unconditional = getattr(config, 'unconditional', False)
-        if self.unconditional:
+        if self.unconditional and self.is_main:
             print("Train for unconditional generation")
 
         # Frozen beta-VAE encoder — never updated. Unconditional runs need no VAE at all.
@@ -91,22 +100,29 @@ class DiffusionTrainer(BaseTrainer):
             self.vae_model = None
 
         self.np, self._embed_scale = self._build_noise_process(config, device)
-        print(f"Noise process: {type(self.np).__name__}")
+        if self.is_main:
+            print(f"Noise process: {type(self.np).__name__}")
 
         self.mixed_precision, self._amp_dtype, self.scaler = self._build_amp(config, device)
-        if self.mixed_precision != 'no':
+        if self.mixed_precision != 'no' and self.is_main:
             active = "active" if self._amp_dtype is not None else f"inactive — {device.type} isn't cuda"
             print(f"Mixed precision: {self.mixed_precision} ({active})")
 
         self.grad_accum_steps = max(1, getattr(config, 'grad_accum_steps', 1))
-        if self.grad_accum_steps > 1:
-            batch_size = getattr(config, 'batch_size', None)
-            eff_bs = f", effective batch size {batch_size * self.grad_accum_steps}" if batch_size is not None else ""
-            print(f"Gradient accumulation: {self.grad_accum_steps} micro-batches/optimizer step{eff_bs}")
+        batch_size = getattr(config, 'batch_size', None)
+        if batch_size is not None and self.is_main:
+            effective_bs = batch_size * self.grad_accum_steps * self.world_size
+            factors = [f"per-GPU batch {batch_size}"]
+            if self.grad_accum_steps > 1:
+                factors.append(f"grad_accum {self.grad_accum_steps}")
+            if self.world_size > 1:
+                factors.append(f"{self.world_size} GPUs")
+            print(f"Effective batch size: {effective_bs} ({' x '.join(factors)})")
 
         ema_decay = getattr(config, 'ema_decay', None)
         self.ema = EMA(model, decay=ema_decay) if ema_decay else None
-        print(f"EMA: decay={ema_decay}" if self.ema is not None else "EMA: disabled")
+        if self.is_main:
+            print(f"EMA: decay={ema_decay}" if self.ema is not None else "EMA: disabled")
 
     @staticmethod
     def _build_amp(config, device: torch.device):
@@ -166,20 +182,38 @@ class DiffusionTrainer(BaseTrainer):
             if self.ema is not None and self._last_loaded_ckpt is not None \
                     and "ema_state_dict" in self._last_loaded_ckpt and not reset_step:
                 self.ema.load_state_dict(self._last_loaded_ckpt["ema_state_dict"])
-                print(f"Resumed EMA shadow (step {self.ema.step})")
+                if self.is_main:
+                    print(f"Resumed EMA shadow (step {self.ema.step})")
 
-        print(f"\n=== Starting Diffusion Training ({self.config.num_steps} steps) ===\n")
+        # Every rank already loaded the same checkpoint file independently above (or
+        # started from the same init, since model construction is deterministic from
+        # config), so DDP's constructor-time parameter broadcast from rank 0 is a no-op
+        # here — just the standard, safe way to guarantee replicas can never drift.
+        if self.world_size > 1:
+            self.ddp_model = DistributedDataParallel(
+                self.model, device_ids=[self.device.index], output_device=self.device.index,
+            )
+        else:
+            self.ddp_model = self.model
+
+        if self.is_main:
+            print(f"\n=== Starting Diffusion Training ({self.config.num_steps} steps) ===\n")
         start_time = time.time()
         if self.ema is not None:
             self.ema.to(self.device)
 
         loader_iter = iter(self.train_dataloader)
+        epoch = 0
 
         def _next_batch():
-            nonlocal loader_iter
+            nonlocal loader_iter, epoch
             try:
                 return next(loader_iter)
             except StopIteration:
+                epoch += 1
+                sampler = getattr(self.train_dataloader, 'sampler', None)
+                if isinstance(sampler, DistributedSampler):
+                    sampler.set_epoch(epoch)
                 loader_iter = iter(self.train_dataloader)
                 return next(loader_iter)
 
@@ -187,9 +221,13 @@ class DiffusionTrainer(BaseTrainer):
             micro_batches = [_next_batch() for _ in range(self.grad_accum_steps)]
 
             loss, grad_norm, noise_bucket_loss = self._train_step(micro_batches)
+            if self.world_size > 1:
+                loss = self._allreduce_mean(loss)
+                grad_norm = self._allreduce_mean(grad_norm)
+                noise_bucket_loss = {k: self._allreduce_mean(v) for k, v in noise_bucket_loss.items()}
             elapsed = elapsed_offset + (time.time() - start_time)
 
-            if not self.step % self.config.log_interval:
+            if not self.step % self.config.log_interval and self.is_main:
                 print(f"Step {self.step}/{self.config.num_steps}")
                 wandb.log({
                     "train/loss": loss,
@@ -198,22 +236,34 @@ class DiffusionTrainer(BaseTrainer):
                 }, step=self.step)
 
             if self.val_dataloader is not None and not self.step % self.config.eval_interval:
+                # Collective — _evaluate() all-reduces internally, so every rank must call
+                # it in lockstep even though only rank 0 acts on the result below.
                 val_loss, val_noise_bucket_loss = self._evaluate()
-                wandb.log({
-                    "val/loss": val_loss,
-                    **{f"val/loss_{name}_noise": v for name, v in val_noise_bucket_loss.items()},
-                }, step=self.step)
-                if val_loss < self.best_val_loss:
-                    self.best_val_loss = val_loss
-                    extra = {"ema_state_dict": self.ema.state_dict()} if self.ema is not None else {}
-                    self._save_checkpoint(elapsed, extra=extra)
-                    wandb.log({"val/best_loss": self.best_val_loss}, step=self.step)
-                    print(f"  ↓ best val_loss={self.best_val_loss:.4f} → saved best_ckpt.pt")
-                self._visualize(self.step)
+                if self.is_main:
+                    wandb.log({
+                        "val/loss": val_loss,
+                        **{f"val/loss_{name}_noise": v for name, v in val_noise_bucket_loss.items()},
+                    }, step=self.step)
+                    if val_loss < self.best_val_loss:
+                        self.best_val_loss = val_loss
+                        extra = {"ema_state_dict": self.ema.state_dict()} if self.ema is not None else {}
+                        self._save_checkpoint(elapsed, extra=extra)
+                        wandb.log({"val/best_loss": self.best_val_loss}, step=self.step)
+                        print(f"  ↓ best val_loss={self.best_val_loss:.4f} → saved best_ckpt.pt")
+                    self._visualize(self.step)
 
             self.step += 1
 
-        print("\n=== Training Complete ===\n")
+        if self.is_main:
+            print("\n=== Training Complete ===\n")
+
+    def _allreduce_mean(self, value: float) -> float:
+        """Average a python scalar across ranks — used to turn each rank's local loss/
+        grad_norm (computed over its own DistributedSampler shard) into the true global
+        value for logging, rather than silently logging only rank 0's local slice."""
+        t = torch.tensor(value, device=self.device)
+        dist.all_reduce(t, op=dist.ReduceOp.SUM)
+        return (t / self.world_size).item()
 
     # ── Shared helpers ────────────────────────────────────────────────────────
 
@@ -283,7 +333,7 @@ class DiffusionTrainer(BaseTrainer):
         bucket_sums = {name: 0.0 for name, _, _ in self._NOISE_BUCKETS}
         bucket_counts = {name: 0 for name, _, _ in self._NOISE_BUCKETS}
 
-        for batch in micro_batches:
+        for i, batch in enumerate(micro_batches):
             x0, z_provided = self._unpack_batch(batch)
             x0 = x0.to(self.device)
             B  = x0.shape[0]
@@ -294,11 +344,21 @@ class DiffusionTrainer(BaseTrainer):
             target   = self.np.get_target(x0, eps)
             t_embed  = self.np.embed_t(t, self._embed_scale)
 
-            with torch.autocast(device_type=self.device.type, dtype=self._amp_dtype, enabled=self._amp_dtype is not None):
-                pred = self.model(x_t, t_embed, z)
-                loss_per = self.np.loss_per_sample(pred, target, t)
-                loss = loss_per.mean() / accum
-            self.scaler.scale(loss).backward()
+            # DDP all-reduces gradients on every .backward() by default; with grad
+            # accumulation we only need that sync once the full effective batch is in,
+            # so suppress it on every micro-batch but the last via no_sync().
+            is_last_micro_batch = i == accum - 1
+            sync_ctx = (
+                contextlib.nullcontext()
+                if self.world_size == 1 or is_last_micro_batch
+                else self.ddp_model.no_sync()
+            )
+            with sync_ctx:
+                with torch.autocast(device_type=self.device.type, dtype=self._amp_dtype, enabled=self._amp_dtype is not None):
+                    pred = self.ddp_model(x_t, t_embed, z)
+                    loss_per = self.np.loss_per_sample(pred, target, t)
+                    loss = loss_per.mean() / accum
+                self.scaler.scale(loss).backward()
             total_loss += loss.item()
 
             noise_level = self.np.noise_level(t)
@@ -317,6 +377,8 @@ class DiffusionTrainer(BaseTrainer):
 
     @torch.no_grad()
     def _evaluate(self):
+        """Collective when world_size > 1: every rank must call this (it all-reduces at
+        the end), even though only rank 0 acts on the returned value — see train()."""
         self.model.eval()
         total, n = 0.0, 0
         bucket_sums = {name: 0.0 for name, _, _ in self._NOISE_BUCKETS}
@@ -342,6 +404,19 @@ class DiffusionTrainer(BaseTrainer):
 
             noise_level = self.np.noise_level(t)
             self._update_noise_buckets(bucket_sums, bucket_counts, loss_per, noise_level)
+
+        if self.world_size > 1:
+            # Each rank only saw its own DistributedSampler shard of val data, so total/n
+            # (and the per-bucket sums/counts) need summing across ranks before dividing —
+            # otherwise "val loss" and the best-checkpoint decision would silently only
+            # reflect rank 0's slice of the validation set.
+            stats = torch.tensor([total, float(n)], device=self.device)
+            dist.all_reduce(stats, op=dist.ReduceOp.SUM)
+            total, n = stats[0].item(), stats[1].item()
+            for name, _, _ in self._NOISE_BUCKETS:
+                bstats = torch.tensor([bucket_sums[name], float(bucket_counts[name])], device=self.device)
+                dist.all_reduce(bstats, op=dist.ReduceOp.SUM)
+                bucket_sums[name], bucket_counts[name] = bstats[0].item(), int(bstats[1].item())
 
         self.model.train()
         return total / n, self._finalize_noise_buckets(bucket_sums, bucket_counts)

@@ -41,7 +41,9 @@ ema_decay: 0.9999
 # raise it if you have an 80GB card, or add grad-accumulation for a closer match
 # to the paper's effective batch of 2048. num_steps is a fraction of the paper's
 # training budget — bump it up for longer Colab/local runs, resuming with --resume.
-grad_accum_steps: 64
-num_steps: 20000
+grad_accum_steps: 16
+num_steps: 500000
 log_interval: 100
-eval_interval: 400
+eval_interval: 500
+resume_ckpt_path: outputs/diffusion_full_imagenet64_flow_grad_accum_ema_h64_mc192_ch1x2x3x4_T1000_flow_uncond_z1/checkpoints/best_ckpt.pt
+reset_step_on_resume: false

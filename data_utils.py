@@ -4,11 +4,38 @@ from typing import List, Optional, Tuple
 import numpy as np
 import torch
 from PIL import Image
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, DistributedSampler
 from torchvision import transforms
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
+
+def _make_loader(
+    dataset: Dataset,
+    batch_size: int,
+    shuffle: bool,
+    num_workers: int,
+    pin_memory: bool,
+    drop_last: bool,
+    rank: int = 0,
+    world_size: int = 1,
+) -> DataLoader:
+    """Build a DataLoader, sharding across ranks via DistributedSampler when world_size > 1
+    (DataLoader's own `shuffle` is mutually exclusive with `sampler`, so it moves into the
+    sampler's `shuffle` arg in that case). Each rank ends up with a disjoint subset of the
+    same size (when drop_last=True), so multi-GPU runs stay in lockstep on batches/epoch."""
+    if world_size > 1:
+        sampler = DistributedSampler(
+            dataset, num_replicas=world_size, rank=rank, shuffle=shuffle, drop_last=drop_last,
+        )
+        return DataLoader(
+            dataset, batch_size=batch_size, sampler=sampler, num_workers=num_workers,
+            pin_memory=pin_memory, drop_last=drop_last,
+        )
+    return DataLoader(
+        dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers,
+        pin_memory=pin_memory, drop_last=drop_last,
+    )
 
 def _find_images(data_dir: str, expressions: List[str]) -> List[str]:
     """Walk data_dir and return paths of images whose expression code is in expressions."""
@@ -123,6 +150,8 @@ def build_face_dataloaders(
     num_workers: int = 4,
     seed: int = 42,
     shuffle_train: bool = True,
+    rank: int = 0,
+    world_size: int = 1,
 ) -> Tuple[DataLoader, DataLoader]:
     """Return (train_dl, test_dl) that yield image tensors [B, C, H, W] in [0, 1].
 
@@ -135,15 +164,13 @@ def build_face_dataloaders(
     all_images = _preload(paths, image_size)
 
     train_idx, test_idx = _split(len(all_images), train_split, seed)
-    train_dl = DataLoader(
-        _TensorDataset(all_images[train_idx]),
-        batch_size=batch_size, shuffle=shuffle_train, num_workers=num_workers,
-        pin_memory=True, drop_last=shuffle_train,
+    train_dl = _make_loader(
+        _TensorDataset(all_images[train_idx]), batch_size, shuffle_train, num_workers,
+        True, shuffle_train, rank, world_size,
     )
-    test_dl = DataLoader(
-        _TensorDataset(all_images[test_idx]),
-        batch_size=batch_size, shuffle=False, num_workers=num_workers,
-        pin_memory=True,
+    test_dl = _make_loader(
+        _TensorDataset(all_images[test_idx]), batch_size, False, num_workers,
+        True, False, rank, world_size,
     )
     n_train, n_test = len(train_idx), len(test_idx)
     print(
@@ -161,6 +188,8 @@ def build_celeba_dataloaders(
     num_workers: int = 8,
     seed: int = 42,
     shuffle_train: bool = True,
+    rank: int = 0,
+    world_size: int = 1,
 ) -> Tuple[DataLoader, DataLoader]:
     """Return (train_dl, test_dl) over CelebA that yield [B, C, H, W] in [0, 1].
 
@@ -183,15 +212,13 @@ def build_celeba_dataloaders(
         transforms.Resize((image_size, image_size)),
         transforms.ToTensor(),
     ])
-    train_dl = DataLoader(
-        _PathDataset(train_paths, transform),
-        batch_size=batch_size, shuffle=shuffle_train, num_workers=num_workers,
-        pin_memory=True, drop_last=shuffle_train,
+    train_dl = _make_loader(
+        _PathDataset(train_paths, transform), batch_size, shuffle_train, num_workers,
+        True, shuffle_train, rank, world_size,
     )
-    test_dl = DataLoader(
-        _PathDataset(test_paths, transform),
-        batch_size=batch_size, shuffle=False, num_workers=num_workers,
-        pin_memory=True,
+    test_dl = _make_loader(
+        _PathDataset(test_paths, transform), batch_size, False, num_workers,
+        True, False, rank, world_size,
     )
     print(
         f"CelebA — Train: {len(train_paths)} images ({len(train_dl)} batches/epoch) | "
@@ -208,6 +235,8 @@ def build_tiny_imagenet_dataloaders(
     num_workers: int = 4,
     seed: int = 42,
     shuffle_train: bool = True,
+    rank: int = 0,
+    world_size: int = 1,
 ) -> Tuple[DataLoader, DataLoader]:
     """Return (train_dl, val_dl) over Tiny ImageNet yielding [B, C, H, W] in [0, 1].
 
@@ -233,15 +262,13 @@ def build_tiny_imagenet_dataloaders(
         transforms.Resize((image_size, image_size)),
         transforms.ToTensor(),
     ])
-    train_dl = DataLoader(
-        _PathDataset(train_paths, transform),
-        batch_size=batch_size, shuffle=shuffle_train, num_workers=num_workers,
-        pin_memory=True, drop_last=shuffle_train,
+    train_dl = _make_loader(
+        _PathDataset(train_paths, transform), batch_size, shuffle_train, num_workers,
+        True, shuffle_train, rank, world_size,
     )
-    test_dl = DataLoader(
-        _PathDataset(test_paths, transform),
-        batch_size=batch_size, shuffle=False, num_workers=num_workers,
-        pin_memory=True,
+    test_dl = _make_loader(
+        _PathDataset(test_paths, transform), batch_size, False, num_workers,
+        True, False, rank, world_size,
     )
     print(
         f"Tiny ImageNet — Train: {len(train_paths)} images ({len(train_dl)} batches/epoch) | "
@@ -259,6 +286,8 @@ def build_imagenet64_dataloaders(
     shuffle_train: bool = True,
     latent_dim: Optional[int] = None,
     unconditional: bool = False,
+    rank: int = 0,
+    world_size: int = 1,
 ) -> Tuple[DataLoader, DataLoader]:
     """Return (train_dl, val_dl) over the pre-downsampled ImageNet64 benchmark
     (van den Oord et al. pickled-batch format, consolidated into flat train_images.npy /
@@ -303,21 +332,21 @@ def build_imagenet64_dataloaders(
                 f"train_{latents_suffix} and val_{latents_suffix}, or neither."
             )
 
-    train_dl = DataLoader(
-        _ImageNet64ArrayDataset(train_path, image_size, train_latents_path),
-        batch_size=batch_size, shuffle=shuffle_train, num_workers=num_workers,
-        pin_memory=True, drop_last=shuffle_train,
+    train_dl = _make_loader(
+        _ImageNet64ArrayDataset(train_path, image_size, train_latents_path), batch_size,
+        shuffle_train, num_workers, True, shuffle_train, rank, world_size,
     )
-    val_dl = DataLoader(
-        _ImageNet64ArrayDataset(val_path, image_size, val_latents_path),
-        batch_size=batch_size, shuffle=False, num_workers=num_workers,
-        pin_memory=True,
+    val_dl = _make_loader(
+        _ImageNet64ArrayDataset(val_path, image_size, val_latents_path), batch_size,
+        False, num_workers, True, False, rank, world_size,
     )
     conditioning = "precomputed latents" if train_latents_path else "none (unconditional / on-the-fly VAE)"
-    print(
-        f"ImageNet64 — Train: {len(train_dl.dataset):,} images ({len(train_dl)} batches/epoch) | "
-        f"Val: {len(val_dl.dataset):,} images ({len(val_dl)} batches) | conditioning: {conditioning}"
-    )
+    if rank == 0:
+        print(
+            f"ImageNet64 — Train: {len(train_dl.dataset):,} images ({len(train_dl)} batches/epoch) | "
+            f"Val: {len(val_dl.dataset):,} images ({len(val_dl)} batches) | conditioning: {conditioning}"
+            + (f" | sharded across {world_size} GPUs" if world_size > 1 else "")
+        )
     return train_dl, val_dl
 
 
@@ -388,6 +417,8 @@ def build_stimuli_dataloaders(
     num_workers: int = 4,
     seed: int = 42,
     shuffle_train: bool = True,
+    rank: int = 0,
+    world_size: int = 1,
 ) -> Tuple[DataLoader, DataLoader]:
     """Return (train_dl, test_dl) over a flat directory of stimuli images.
 
@@ -408,15 +439,13 @@ def build_stimuli_dataloaders(
         transforms.Resize((image_size, image_size)),
         transforms.ToTensor(),
     ])
-    train_dl = DataLoader(
-        _PathDataset(train_paths, transform),
-        batch_size=batch_size, shuffle=shuffle_train, num_workers=num_workers,
-        pin_memory=True, drop_last=shuffle_train,
+    train_dl = _make_loader(
+        _PathDataset(train_paths, transform), batch_size, shuffle_train, num_workers,
+        True, shuffle_train, rank, world_size,
     )
-    test_dl = DataLoader(
-        _PathDataset(test_paths, transform),
-        batch_size=batch_size, shuffle=False, num_workers=num_workers,
-        pin_memory=True,
+    test_dl = _make_loader(
+        _PathDataset(test_paths, transform), batch_size, False, num_workers,
+        True, False, rank, world_size,
     )
     print(
         f"Stimuli — Train: {len(train_paths)} images ({len(train_dl)} batches/epoch) | "
@@ -425,8 +454,12 @@ def build_stimuli_dataloaders(
     return train_dl, test_dl
 
 
-def build_dataloaders(cfg) -> Tuple[DataLoader, DataLoader]:
-    """Dispatch to the right dataloader based on cfg.dataset_type."""
+def build_dataloaders(cfg, rank: int = 0, world_size: int = 1) -> Tuple[DataLoader, DataLoader]:
+    """Dispatch to the right dataloader based on cfg.dataset_type.
+
+    rank/world_size > 1 shard the dataset across GPUs via DistributedSampler (see
+    _make_loader) for DDP training — see scripts/diffusion_train.py.
+    """
     dataset_type = getattr(cfg, "dataset_type", "cfd")
     # Resolve image size — BetaVAE config uses input_height/input_width; Diffusion uses image_size
     h = getattr(cfg, "input_height", getattr(cfg, "image_size", 64))
@@ -438,6 +471,7 @@ def build_dataloaders(cfg) -> Tuple[DataLoader, DataLoader]:
             image_size=h,
             train_split=cfg.train_split,
             batch_size=cfg.batch_size,
+            rank=rank, world_size=world_size,
         )
     elif dataset_type == "tiny_imagenet":
         return build_tiny_imagenet_dataloaders(
@@ -445,6 +479,7 @@ def build_dataloaders(cfg) -> Tuple[DataLoader, DataLoader]:
             image_size=h,
             train_split=cfg.train_split,
             batch_size=cfg.batch_size,
+            rank=rank, world_size=world_size,
         )
     elif dataset_type == "stimuli":
         return build_stimuli_dataloaders(
@@ -452,6 +487,7 @@ def build_dataloaders(cfg) -> Tuple[DataLoader, DataLoader]:
             image_size=h,
             train_split=cfg.train_split,
             batch_size=cfg.batch_size,
+            rank=rank, world_size=world_size,
         )
     elif dataset_type == "imagenet64":
         return build_imagenet64_dataloaders(
@@ -460,6 +496,7 @@ def build_dataloaders(cfg) -> Tuple[DataLoader, DataLoader]:
             batch_size=cfg.batch_size,
             latent_dim=getattr(cfg, "latent_dim", None),
             unconditional=getattr(cfg, "unconditional", False),
+            rank=rank, world_size=world_size,
         )
     else:
         return build_face_dataloaders(
@@ -468,4 +505,5 @@ def build_dataloaders(cfg) -> Tuple[DataLoader, DataLoader]:
             image_size=(h, w),
             train_split=cfg.train_split,
             batch_size=cfg.batch_size,
+            rank=rank, world_size=world_size,
         )
