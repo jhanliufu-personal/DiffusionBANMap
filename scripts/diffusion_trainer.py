@@ -119,6 +119,10 @@ class DiffusionTrainer(BaseTrainer):
                 factors.append(f"{self.world_size} GPUs")
             print(f"Effective batch size: {effective_bs} ({' x '.join(factors)})")
 
+        self.ckpt_interval = getattr(config, 'ckpt_interval', None)
+        if self.ckpt_interval and self.is_main:
+            print(f"Checkpointing every {self.ckpt_interval} steps (uniform, in addition to best-val)")
+
         ema_decay = getattr(config, 'ema_decay', None)
         self.ema = EMA(model, decay=ema_decay) if ema_decay else None
         if self.is_main:
@@ -251,6 +255,12 @@ class DiffusionTrainer(BaseTrainer):
                         wandb.log({"val/best_loss": self.best_val_loss}, step=self.step)
                         print(f"  ↓ best val_loss={self.best_val_loss:.4f} → saved best_ckpt.pt")
                     self._visualize(self.step)
+
+            if self.ckpt_interval and not self.step % self.ckpt_interval and self.is_main:
+                extra = {"ema_state_dict": self.ema.state_dict()} if self.ema is not None else {}
+                ckpt_filename = f"ckpt_step_{self.step:07d}.pt"
+                self._save_checkpoint(elapsed, extra=extra, filename=ckpt_filename)
+                print(f"  Saved periodic checkpoint → {ckpt_filename}")
 
             self.step += 1
 

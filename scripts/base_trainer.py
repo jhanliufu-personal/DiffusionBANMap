@@ -35,16 +35,23 @@ class BaseTrainer:
         if self.world_size > 1:
             torch.distributed.barrier()
 
-    def _save_checkpoint(self, elapsed_time: float, extra: dict = {}, filename: str = "best_ckpt.pt"):
+    def _save_checkpoint(
+        self,
+        elapsed_time: float,
+        extra: dict = {},
+        filename: str = "best_ckpt.pt",
+        include_optimizer_state: bool = True,
+    ):
         if not self.is_main:
             return
         ckpt = {
             "step": self.step,
             "model_state_dict": self.model.state_dict(),
-            "optimizer_state_dict": self.optimizer.state_dict(),
             "elapsed_time": elapsed_time,
             **extra,
         }
+        if include_optimizer_state:
+            ckpt["optimizer_state_dict"] = self.optimizer.state_dict()
         if self.scheduler is not None:
             ckpt["scheduler_state_dict"] = self.scheduler.state_dict()
         torch.save(ckpt, os.path.join(self.ckpt_dir, filename))
@@ -63,7 +70,8 @@ class BaseTrainer:
         """
         ckpt = torch.load(path, map_location=self.device)
         self.model.load_state_dict(ckpt["model_state_dict"])
-        self.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        if "optimizer_state_dict" in ckpt:
+            self.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
         if self.scheduler is not None and "scheduler_state_dict" in ckpt:
             self.scheduler.load_state_dict(ckpt["scheduler_state_dict"])
         self._last_loaded_ckpt = ckpt
