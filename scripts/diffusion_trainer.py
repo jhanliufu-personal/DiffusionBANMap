@@ -254,7 +254,7 @@ class DiffusionTrainer(BaseTrainer):
                         self._save_checkpoint(elapsed, extra=extra)
                         wandb.log({"val/best_loss": self.best_val_loss}, step=self.step)
                         print(f"  ↓ best val_loss={self.best_val_loss:.4f} → saved best_ckpt.pt")
-                    self._visualize(self.step)
+                    # self._visualize(self.step)
 
             if self.ckpt_interval and not self.step % self.ckpt_interval and self.is_main:
                 extra = {"ema_state_dict": self.ema.state_dict()} if self.ema is not None else {}

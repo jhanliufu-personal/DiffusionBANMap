@@ -105,7 +105,10 @@ def main_worker(rank: int, world_size: int, args: argparse.Namespace) -> None:
     if is_main:
         run_name = f"{cfg.experiment_name}_{args.run_name}" if args.run_name else cfg.experiment_name
         wandb.login(key=os.environ["WANDB_API_KEY"])
-        wandb.init(project="diffusion_ban_map", name=run_name, notes=args.notes, config=vars(cfg))
+        # wandb.init(project="diffusion_ban_map", name=run_name, notes=args.notes, config=vars(cfg))
+        
+        # This is one time thing ... for resuming uncond training
+        wandb.init(project="diffusion_ban_map", resume_from=f"{run_name}?_step=13600")
 
     trainer = DiffusionTrainer(
         model=model,
