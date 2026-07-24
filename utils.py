@@ -51,9 +51,23 @@ def setup_distributed(rank: int, world_size: int, port: str = "29500") -> torch.
     """
     os.environ.setdefault("MASTER_ADDR", "localhost")
     os.environ.setdefault("MASTER_PORT", port)
-    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+
+    # Some cluster images (e.g. GCP A3 VMs) preset NCCL_NET=gIB in the shell environment
+    # for Google's multi-node GPUDirect NCCL plugin. This script is single-node only
+    # (mp.spawn, MASTER_ADDR=localhost) with GPUs already fully NVLink-connected, so that
+    # plugin has nothing to attach to — forcing it causes a fatal "Failed to initialize
+    # any NET plugin" error on the first collective. Override to NCCL's built-in Socket
+    # plugin, which needs no special fabric/config and is only used for bootstrap here
+    # anyway since NVLink/P2P handles the actual GPU-to-GPU traffic.
+    os.environ["NCCL_NET"] = "Socket"
+
     torch.cuda.set_device(rank)
-    return torch.device("cuda", rank)
+    device = torch.device("cuda", rank)
+    # device_id lets NCCL eagerly bind to the right GPU instead of "guessing" it from
+    # rank at first-collective time (the warning this used to print) — needed for
+    # reliable barrier()/collective behavior on newer NCCL (2.29+).
+    dist.init_process_group("nccl", rank=rank, world_size=world_size, device_id=device)
+    return device
 
 
 def cleanup_distributed() -> None:
