@@ -193,9 +193,17 @@ def main():
     torch.save(denoised_latents, latents_out_path)
     print(f"Saved denoised latents {tuple(denoised_latents.shape)} to {latents_out_path}")
 
+    # Decode in the same batch_size chunks as denoising -- a single vae.decode() call on
+    # all N latents at once tries to materialize the full upsampled (N, 3, 512, 512)
+    # activation stack in one shot, which is what actually OOM'd (the UNet step above only
+    # ever operates on tiny 4x64x64 latents, so it never hit this).
+    decoded_batches = []
     with torch.no_grad():
-        images = vae.decode(denoised_latents.to(device) / scaling_factor).sample
-        images = ((images.clamp(-1, 1) + 1.0) / 2.0).cpu()
+        for start in range(0, n, args.batch_size):
+            end = min(start + args.batch_size, n)
+            batch_images = vae.decode(denoised_latents[start:end].to(device) / scaling_factor).sample
+            decoded_batches.append(((batch_images.clamp(-1, 1) + 1.0) / 2.0).cpu())
+    images = torch.cat(decoded_batches, dim=0)
     images_out_path = os.path.join(args.output_dir, "denoised_images.pt")
     torch.save(images, images_out_path)
     print(f"Saved decoded images {tuple(images.shape)} to {images_out_path}")
