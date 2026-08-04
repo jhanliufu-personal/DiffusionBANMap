@@ -209,6 +209,10 @@ MODEL_REGISTRY = {
     "sd_vae": {
         "display_name": "Stable Diffusion VAE (stabilityai/sd-vae-ft-mse)",
         "image_size": 512,
+        # Global BATCH_SIZE (64) is sized for AlexNet/CLIP at 224x224; encoding at 512x512
+        # through the VAE's conv+attention stack is far heavier per image and OOM'd at 64 --
+        # override to a smaller batch size just for this encoder.
+        "batch_size": 8,
         "load_fn": _load_sd_vae("stabilityai/sd-vae-ft-mse"),
     },
 }
@@ -259,8 +263,10 @@ def main():
     assert MODEL_NAME in MODEL_REGISTRY, f"Unknown MODEL_NAME {MODEL_NAME!r}, choose from {list(MODEL_REGISTRY)}"
     image_size = MODEL_REGISTRY[MODEL_NAME]["image_size"]
 
+    batch_size = MODEL_REGISTRY[MODEL_NAME].get("batch_size", BATCH_SIZE)
+
     extract_batch, cleanup_model = MODEL_REGISTRY[MODEL_NAME]["load_fn"](device)
-    print(f"Loaded encoder: {MODEL_REGISTRY[MODEL_NAME]['display_name']}  (image_size={image_size})")
+    print(f"Loaded encoder: {MODEL_REGISTRY[MODEL_NAME]['display_name']}  (image_size={image_size}, batch_size={batch_size})")
 
     # --- Build train/val dataloaders (unshuffled, for encoding) ---
     # build_encode_dataloader returns a single, always-unshuffled DataLoader over a flat
@@ -280,7 +286,7 @@ def main():
     # )
 
     val_encode_dl = build_encode_dataloader(
-        VAL_DATA_DIR, image_size=image_size, batch_size=BATCH_SIZE, num_workers=0
+        VAL_DATA_DIR, image_size=image_size, batch_size=batch_size, num_workers=0
     )
 
     # --- Fit PCA on a random subsample of train (disabled, mirrors notebook) ---
@@ -327,8 +333,8 @@ def main():
     # train_latents_path = os.path.join(OUTPUT_DIR, "train_latents.npy")
     val_latents_path = os.path.join(OUTPUT_DIR, "val_latents.npy")
 
-    # _stream_latents(train_encode_dl, train_latents_path, extract_batch, BATCH_SIZE)
-    _stream_latents(val_encode_dl, val_latents_path, extract_batch, BATCH_SIZE)
+    # _stream_latents(train_encode_dl, train_latents_path, extract_batch, batch_size)
+    _stream_latents(val_encode_dl, val_latents_path, extract_batch, batch_size)
 
     cleanup_model()
 
