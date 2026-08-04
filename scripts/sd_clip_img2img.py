@@ -59,7 +59,7 @@ def _load_array(path: str) -> torch.Tensor:
 
 @torch.no_grad()
 def denoise_batch(unet, scheduler, latents, cond, num_inference_steps, strength, guidance_scale, device,
-                   pure_noise_start=False):
+                   pure_noise_start=False, null_cond=False):
     """SDEdit-style partial noise + denoise: re-noise `latents` back to the
     timestep set by `strength` (0 = return input unchanged, 1 = noise all the
     way to pure noise, i.e. plain text/image-to-image generation), then run the
@@ -73,11 +73,20 @@ def denoise_batch(unet, scheduler, latents, cond, num_inference_steps, strength,
     leaves a tiny residual of the input latent mixed in (alpha_cumprod at the top
     scheduler timestep isn't exactly 0), so it isn't bit-for-bit equivalent to a
     from-scratch generation. This bypasses that and starts from actual Gaussian
-    noise, fully decoupled from `latents`, conditioned only on `cond`."""
+    noise, fully decoupled from `latents`, conditioned only on `cond`.
+
+    null_cond=True is a debug control to isolate whether `cond` itself is the
+    problem: overrides cond with the same zero embedding the model was trained
+    to interpret as "no conditioning" (the CFG unconditional branch below),
+    ignoring --cond_path entirely. If generation still looks bad with
+    pure_noise_start + null_cond both set, the bug isn't in the conditioning
+    vectors."""
     latents = latents.to(device)
     cond = cond.to(device)
     if cond.dim() == 2:
         cond = cond.unsqueeze(1)  # [B, 768] -> [B, 1, 768] single-token cross-attn context
+    if null_cond:
+        cond = torch.zeros_like(cond)
 
     scheduler.set_timesteps(num_inference_steps, device=device)
     init_timestep = min(int(num_inference_steps * strength), num_inference_steps)
@@ -122,9 +131,13 @@ def main():
                          help="Debug control: ignore --latents_path content, start from actual Gaussian "
                               "noise instead (see denoise_batch docstring). Requires --strength=1.0 "
                               "(auto-corrected if not set) so the full reverse schedule runs.")
-    parser.add_argument("--num_inference_steps", type=int, default=50)
+    parser.add_argument("--null_cond", action="store_true",
+                         help="Debug control: ignore --cond_path content, condition on an all-zero "
+                              "embedding instead (see denoise_batch docstring). Use with "
+                              "--guidance_scale=1.0 for a clean unconditional test.")
+    parser.add_argument("--num_inference_steps", type=int, default=100)
     parser.add_argument("--guidance_scale", type=float, default=1.0)
-    parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--n_show", type=int, default=8, help="How many images to include in the saved example grid")
     args = parser.parse_args()
@@ -172,6 +185,7 @@ def main():
             guidance_scale=args.guidance_scale,
             device=device,
             pure_noise_start=args.pure_noise_start,
+            null_cond=args.null_cond,
         ))
     denoised_latents = torch.cat(denoised_batches, dim=0)
 
