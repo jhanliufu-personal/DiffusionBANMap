@@ -58,7 +58,8 @@ def _load_array(path: str) -> torch.Tensor:
 
 
 @torch.no_grad()
-def denoise_batch(unet, scheduler, latents, cond, num_inference_steps, strength, guidance_scale, device):
+def denoise_batch(unet, scheduler, latents, cond, num_inference_steps, strength, guidance_scale, device,
+                   pure_noise_start=False):
     """SDEdit-style partial noise + denoise: re-noise `latents` back to the
     timestep set by `strength` (0 = return input unchanged, 1 = noise all the
     way to pure noise, i.e. plain text/image-to-image generation), then run the
@@ -66,7 +67,13 @@ def denoise_batch(unet, scheduler, latents, cond, num_inference_steps, strength,
     StableDiffusionImg2ImgPipeline loop, with `cond` (precomputed CLIP image
     embeddings) standing in for the usual text-prompt embeddings -- matches
     lambdalabs/sd-image-variations-diffusers' convention of a single-token
-    cross-attention context."""
+    cross-attention context.
+
+    pure_noise_start=True is a debug control: even strength=1.0's add_noise call
+    leaves a tiny residual of the input latent mixed in (alpha_cumprod at the top
+    scheduler timestep isn't exactly 0), so it isn't bit-for-bit equivalent to a
+    from-scratch generation. This bypasses that and starts from actual Gaussian
+    noise, fully decoupled from `latents`, conditioned only on `cond`."""
     latents = latents.to(device)
     cond = cond.to(device)
     if cond.dim() == 2:
@@ -79,7 +86,10 @@ def denoise_batch(unet, scheduler, latents, cond, num_inference_steps, strength,
 
     noise = torch.randn_like(latents)
     latent_timestep = timesteps[:1].repeat(latents.shape[0])
-    latents = scheduler.add_noise(latents, noise, latent_timestep)
+    if pure_noise_start:
+        latents = torch.randn_like(latents) * scheduler.init_noise_sigma
+    else:
+        latents = scheduler.add_noise(latents, noise, latent_timestep)
 
     do_cfg = guidance_scale != 1.0
     uncond = torch.zeros_like(cond) if do_cfg else None
@@ -108,12 +118,20 @@ def main():
                          help="Should match whatever VAE encoded --latents_path (see notebooks/extract_image_embeddings.ipynb)")
     parser.add_argument("--strength", type=float, default=0.6,
                          help="Fraction of the noise schedule to re-noise input latents to before denoising")
+    parser.add_argument("--pure_noise_start", action="store_true",
+                         help="Debug control: ignore --latents_path content, start from actual Gaussian "
+                              "noise instead (see denoise_batch docstring). Requires --strength=1.0 "
+                              "(auto-corrected if not set) so the full reverse schedule runs.")
     parser.add_argument("--num_inference_steps", type=int, default=50)
     parser.add_argument("--guidance_scale", type=float, default=1.0)
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--n_show", type=int, default=8, help="How many images to include in the saved example grid")
     args = parser.parse_args()
+
+    if args.pure_noise_start and args.strength != 1.0:
+        print(f"--pure_noise_start requires the full schedule -- forcing --strength=1.0 (was {args.strength})")
+        args.strength = 1.0
 
     os.makedirs(args.output_dir, exist_ok=True)
     device = torch.device(discover_device())
@@ -153,6 +171,7 @@ def main():
             strength=args.strength,
             guidance_scale=args.guidance_scale,
             device=device,
+            pure_noise_start=args.pure_noise_start,
         ))
     denoised_latents = torch.cat(denoised_batches, dim=0)
 
