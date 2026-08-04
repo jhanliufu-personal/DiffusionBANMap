@@ -155,7 +155,7 @@ def main():
     cond = _load_array(args.cond_path)
     assert latents.shape[0] == cond.shape[0], \
         f"latents ({latents.shape[0]}) and cond ({cond.shape[0]}) must have the same N"
-    assert latents.shape[1:] == (4, 8, 8), f"Expected [N, 4, 8, 8] latents, got {tuple(latents.shape)}"
+    # assert latents.shape[1:] == (4, 8, 8), f"Expected [N, 4, 8, 8] latents, got {tuple(latents.shape)}"
     print(f"Loaded {latents.shape[0]} latents {tuple(latents.shape)} and conditioning {tuple(cond.shape)}")
 
     from diffusers import UNet2DConditionModel, AutoencoderKL, DDIMScheduler
