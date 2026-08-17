@@ -12,24 +12,27 @@ scheduler, so it's loaded and driven directly via `diffusers` here. `discover_de
 is reused from utils.py.
 
 Expects:
-  - --latents_path: [N, 4, 8, 8] float array/tensor, SD-VAE-encoded and already
-    scaled by vae.config.scaling_factor -- e.g. the sd_vae encoder in
-    notebooks/extract_image_embeddings.ipynb, or the regressed/unflattened
-    y_pred_latent from analysis/aixs_tuning_analysis.ipynb.
+  - --latents_path: [N, 4, 64, 64] float array/tensor, SD-VAE-encoded (at
+    IMAGE_SIZE=512 -- SD 1.x's training latent shape) and already scaled by
+    vae.config.scaling_factor -- e.g. the sd_vae encoder in
+    scripts/extract_image_embeddings.py, or the regressed/unflattened
+    y_pred_latent from analysis/aixs_tuning_analysis.ipynb. Required unless
+    --pure_noise_start is set, in which case this is never read -- a noise
+    tensor is synthesized internally instead (N inferred from --cond_path, or
+    from --n if --null_cond is also set).
   - --cond_path: [N, 768] float array/tensor, CLIP ViT-L/14 image embeddings --
     the clip_vit_l14 encoder in notebooks/extract_image_embeddings.ipynb's
     MODEL_REGISTRY. 768 is what the default --sd_model_id's cross-attention
     expects; a different encoder's output width will fail inside the UNet
-    forward call with a shape mismatch.
+    forward call with a shape mismatch. Required unless --null_cond is set, in
+    which case this is never read -- a zero tensor is synthesized internally
+    instead (N inferred from --latents_path, or from --n if
+    --pure_noise_start is also set).
 
 The default --sd_model_id, lambdalabs/sd-image-variations-diffusers, matters: it's
 a SD 1.x UNet specifically fine-tuned to take a single CLIP image embedding as
 cross-attention context (encoder_hidden_states), unlike stock
 runwayml/stable-diffusion-v1-5 which only ever saw CLIP *text* embeddings.
-
-Caveat: SD 1.x's UNet was trained exclusively on 64x64 latents (512x512 images).
-Running it on 8x8 latents (64x64 stimuli) is far outside its training
-distribution -- treat this as an experiment, not an expected-to-work pipeline.
 
 Usage (run from repo root, as `python -m scripts.<name>` per this repo's
 convention):
@@ -37,6 +40,11 @@ convention):
         --latents_path path/to/latents.npy \
         --cond_path path/to/clip_vit_l14_embeddings.npy \
         --output_dir outputs/sd_clip_img2img
+
+Debug control run, no input files at all (see --pure_noise_start/--null_cond/--n):
+    python -m scripts.sd_clip_img2img \
+        --pure_noise_start --null_cond --n 8 --strength 1.0 --guidance_scale 1.0 \
+        --output_dir outputs/sd_clip_img2img_pure_control
 """
 
 import os
@@ -118,8 +126,20 @@ def denoise_batch(unet, scheduler, latents, cond, num_inference_steps, strength,
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--latents_path", type=str, required=True)
-    parser.add_argument("--cond_path", type=str, required=True)
+    parser.add_argument("--latents_path", type=str, default=None,
+                         help="[N, 4, 64, 64] SD-VAE latents. Required unless --pure_noise_start is set, "
+                              "in which case a noise tensor is synthesized internally instead and this is "
+                              "ignored entirely (N is inferred from --cond_path, or from --n if --null_cond "
+                              "is also set).")
+    parser.add_argument("--cond_path", type=str, default=None,
+                         help="[N, 768] CLIP ViT-L/14 embeddings. Required unless --null_cond is set, in "
+                              "which case a zero tensor is synthesized internally instead and this is "
+                              "ignored entirely (N is inferred from --latents_path, or from --n if "
+                              "--pure_noise_start is also set).")
+    parser.add_argument("--n", type=int, default=None,
+                         help="Batch size to synthesize --latents_path/--cond_path content for. Only "
+                              "needed when both --pure_noise_start and --null_cond are set, since neither "
+                              "input file is read in that case.")
     parser.add_argument("--output_dir", type=str, default="outputs/sd_clip_img2img")
     parser.add_argument("--sd_model_id", type=str, default="lambdalabs/sd-image-variations-diffusers",
                          help="SD 1.x checkpoint (unet + scheduler subfolders) accepting CLIP image-embedding conditioning")
@@ -128,13 +148,13 @@ def main():
     parser.add_argument("--strength", type=float, default=0.6,
                          help="Fraction of the noise schedule to re-noise input latents to before denoising")
     parser.add_argument("--pure_noise_start", action="store_true",
-                         help="Debug control: ignore --latents_path content, start from actual Gaussian "
-                              "noise instead (see denoise_batch docstring). Requires --strength=1.0 "
-                              "(auto-corrected if not set) so the full reverse schedule runs.")
+                         help="Debug control: don't read --latents_path at all, synthesize a Gaussian "
+                              "noise tensor internally instead (see denoise_batch docstring). Requires "
+                              "--strength=1.0 (auto-corrected if not set) so the full reverse schedule runs.")
     parser.add_argument("--null_cond", action="store_true",
-                         help="Debug control: ignore --cond_path content, condition on an all-zero "
-                              "embedding instead (see denoise_batch docstring). Use with "
-                              "--guidance_scale=1.0 for a clean unconditional test.")
+                         help="Debug control: don't read --cond_path at all, synthesize an all-zero "
+                              "embedding tensor internally instead (see denoise_batch docstring). Use "
+                              "with --guidance_scale=1.0 for a clean unconditional test.")
     parser.add_argument("--num_inference_steps", type=int, default=100)
     parser.add_argument("--guidance_scale", type=float, default=1.0)
     parser.add_argument("--batch_size", type=int, default=16)
@@ -151,12 +171,39 @@ def main():
     torch.manual_seed(args.seed)
     print(f"Device: {device}")
 
-    latents = _load_array(args.latents_path)
-    cond = _load_array(args.cond_path)
-    assert latents.shape[0] == cond.shape[0], \
-        f"latents ({latents.shape[0]}) and cond ({cond.shape[0]}) must have the same N"
-    # assert latents.shape[1:] == (4, 8, 8), f"Expected [N, 4, 8, 8] latents, got {tuple(latents.shape)}"
-    print(f"Loaded {latents.shape[0]} latents {tuple(latents.shape)} and conditioning {tuple(cond.shape)}")
+    LATENT_SHAPE = (4, 64, 64)  # SD 1.x training latent shape (512x512 images, 8x VAE downsampling)
+    CLIP_EMBED_DIM = 768        # CLIP ViT-L/14 image embedding width, matches the default --sd_model_id's cross-attention
+
+    if args.pure_noise_start and args.null_cond:
+        # Neither input file is read at all -- N has no other source, so it must be given explicitly.
+        assert args.n is not None, \
+            "--pure_noise_start and --null_cond together need --n (neither --latents_path nor --cond_path is read)"
+        n = args.n
+        latents = torch.zeros(n, *LATENT_SHAPE)  # placeholder shape/dtype; denoise_batch's pure_noise_start branch overwrites the content
+        cond = torch.zeros(n, CLIP_EMBED_DIM)
+        print(f"--pure_noise_start + --null_cond: ignoring --latents_path/--cond_path entirely, N={n} from --n")
+    elif args.pure_noise_start:
+        assert args.cond_path, "--cond_path is required (to infer N) when --pure_noise_start is set without --null_cond"
+        cond = _load_array(args.cond_path)
+        n = cond.shape[0]
+        latents = torch.zeros(n, *LATENT_SHAPE)  # placeholder shape/dtype; denoise_batch's pure_noise_start branch overwrites the content
+        print(f"--pure_noise_start: ignoring --latents_path entirely, N={n} inferred from --cond_path")
+    elif args.null_cond:
+        assert args.latents_path, "--latents_path is required (to infer N) when --null_cond is set without --pure_noise_start"
+        latents = _load_array(args.latents_path)
+        n = latents.shape[0]
+        cond = torch.zeros(n, CLIP_EMBED_DIM)
+        print(f"--null_cond: ignoring --cond_path entirely, N={n} inferred from --latents_path")
+    else:
+        assert args.latents_path and args.cond_path, \
+            "--latents_path and --cond_path are required unless --pure_noise_start/--null_cond are set"
+        latents = _load_array(args.latents_path)
+        cond = _load_array(args.cond_path)
+        assert latents.shape[0] == cond.shape[0], \
+            f"latents ({latents.shape[0]}) and cond ({cond.shape[0]}) must have the same N"
+        n = latents.shape[0]
+
+    print(f"N={n}  latents {tuple(latents.shape)}  conditioning {tuple(cond.shape)}")
 
     from diffusers import UNet2DConditionModel, AutoencoderKL, DDIMScheduler
 
@@ -172,7 +219,6 @@ def main():
         p.requires_grad_(False)
     scaling_factor = vae.config.scaling_factor
 
-    n = latents.shape[0]
     denoised_batches = []
     for start in range(0, n, args.batch_size):
         end = min(start + args.batch_size, n)
