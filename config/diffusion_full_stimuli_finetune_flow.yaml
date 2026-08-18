@@ -23,7 +23,7 @@ unconditional: false
 noise_process: flow
 num_timesteps: 1000        # sinusoidal embedding scale only; flow itself uses t in [0,1]
 cfg_uncond_prob: 0.0
-latent_dim: 1               # unused (z is a zero vector) since unconditional: true
+latent_dim: 50               # unused (z is a zero vector) since unconditional: true
 
 # Optimizer
 lr: 1.0e-5
