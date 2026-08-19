@@ -1,5 +1,5 @@
 experiment_name: diffusion_full_imagenet64_flow
-output_dir: outputs/diffusion_full_imagenet64_flow
+output_dir: outputs/diffusion_full_imagenet64_flow_grad_accum_ema
 
 # Data — run scripts/prepare_imagenet64_dataset.py first (expects
 # <data_dir>/train_images.npy and <data_dir>/val_images.npy already consolidated).
@@ -46,7 +46,8 @@ ema_decay: 0.9999         # standard ADM/Flow-Matching value; sample from ema_st
 # to the paper's effective batch of 2048 (32 * 64 = 2048) without raising peak
 # activation memory past one micro-batch. num_steps is a fraction of the paper's
 # training budget — bump it up for longer Colab/local runs, resuming with --resume.
-grad_accum_steps: 64
-num_steps: 20000
+grad_accum_steps: 16
+num_steps: 500000
+ckpt_interval: 25000  # uniform checkpoint every 25k steps (20 total) for a FID-vs-compute curve
 log_interval: 100
 eval_interval: 400

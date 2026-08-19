@@ -63,15 +63,31 @@ def _find_all_images(data_dir: str) -> List[str]:
 
 
 class _PathDataset(Dataset):
-    def __init__(self, paths: List[str], transform):
+    """If latents_path is given (an (N, latent_dim) array whose row i is the precomputed
+    conditioning latent for image i in `paths`, same order), __getitem__ returns
+    (image, latent) tuples instead of a plain image tensor -- mirrors
+    _ImageNet64ArrayDataset's latents_path convention, adapted for a folder of files.
+    """
+
+    def __init__(self, paths: List[str], transform, latents_path: Optional[str] = None):
         self.paths = paths
         self.transform = transform
+        self.latents = np.load(latents_path, mmap_mode='r') if latents_path is not None else None
+        if self.latents is not None and len(self.latents) != len(self.paths):
+            raise ValueError(
+                f"Latents/images count mismatch: {len(self.latents)} ({latents_path}) "
+                f"vs {len(self.paths)} images"
+            )
 
     def __len__(self) -> int:
         return len(self.paths)
 
-    def __getitem__(self, idx: int) -> torch.Tensor:
-        return self.transform(Image.open(self.paths[idx]).convert("RGB"))
+    def __getitem__(self, idx: int):
+        img = self.transform(Image.open(self.paths[idx]).convert("RGB"))
+        if self.latents is None:
+            return img
+        latent = torch.from_numpy(np.array(self.latents[idx])).float()
+        return img, latent
 
 
 class _TensorDataset(Dataset):
@@ -417,12 +433,36 @@ def build_stimuli_dataloaders(
     num_workers: int = 4,
     seed: int = 42,
     shuffle_train: bool = True,
+    latent_dim: Optional[int] = None,
+    unconditional: bool = False,
+    val_data_dir: Optional[str] = None,
     rank: int = 0,
     world_size: int = 1,
 ) -> Tuple[DataLoader, DataLoader]:
     """Return (train_dl, test_dl) over a flat directory of stimuli images.
 
     Images are loaded on-the-fly and converted to RGB (handles grayscale TIFF).
+
+    If train_latents_z{latent_dim}.npy / val_latents_z{latent_dim}.npy are present in
+    data_dir (same naming convention as build_imagenet64_dataloaders), switches to
+    (image, latent) tuples for precomputed-latent conditioning -- detected purely from
+    what's on disk, unless unconditional=True, which skips latent detection entirely
+    (same guard as build_imagenet64_dataloaders) so leftover latents files from a reused
+    data_dir can never leak into an unconditional run.
+
+    Unlike imagenet64, this folder-of-files dataset has no separate on-disk train/val
+    image arrays for the latents to already be split against -- e.g. for
+    data/15901Stimuli, train_latents_z50.npy covers *all* 15901 images there, while
+    val_latents_z50.npy covers a completely different, much smaller directory (this
+    repo's canonical held-out stimulus set, data/500Stimuli). So when latents are
+    present: ALL of data_dir's images become train (row-aligned with
+    train_latents_z{latent_dim}.npy in sorted-path order), and val images come from
+    val_data_dir (default: the sibling directory "500Stimuli", e.g. data/500Stimuli next
+    to data/15901Stimuli), row-aligned with val_latents_z{latent_dim}.npy. train_split
+    and seed are ignored in this branch -- there's nothing left to split.
+
+    Without latents present, behaves as before: a single random train_split/seed split of
+    data_dir's own images (test_dl is a held-out fraction of data_dir, not val_data_dir).
 
     shuffle_train=False makes train_dl unshuffled with no dropped batch (test_dl already
     behaves this way) — for a full, order-preserving pass instead of actual training.
@@ -431,14 +471,49 @@ def build_stimuli_dataloaders(
     if not paths:
         raise FileNotFoundError(f"No images found in {data_dir}")
 
-    train_idx, test_idx = _split(len(paths), train_split, seed)
-    train_paths = [paths[i] for i in train_idx.tolist()]
-    test_paths  = [paths[i] for i in test_idx.tolist()]
+    train_latents_path = val_latents_path = None
+    if not unconditional:
+        latents_suffix = f"latents_z{latent_dim}.npy" if latent_dim is not None else "latents.npy"
+        candidate_train = os.path.join(data_dir, f"train_{latents_suffix}")
+        candidate_val = os.path.join(data_dir, f"val_{latents_suffix}")
+        train_latents_path = candidate_train if os.path.exists(candidate_train) else None
+        val_latents_path = candidate_val if os.path.exists(candidate_val) else None
+        if (train_latents_path is None) != (val_latents_path is None):
+            raise FileNotFoundError(
+                f"Found latents for one split but not the other in {data_dir} — expected both "
+                f"train_{latents_suffix} and val_{latents_suffix}, or neither."
+            )
 
     transform = transforms.Compose([
         transforms.Resize((image_size, image_size)),
         transforms.ToTensor(),
     ])
+
+    if train_latents_path is not None:
+        val_dir = val_data_dir or os.path.join(os.path.dirname(os.path.normpath(data_dir)), "500Stimuli")
+        val_paths = _find_all_images(val_dir)
+        if not val_paths:
+            raise FileNotFoundError(f"No images found in val_data_dir {val_dir}")
+
+        train_dl = _make_loader(
+            _PathDataset(paths, transform, train_latents_path), batch_size, shuffle_train, num_workers,
+            True, shuffle_train, rank, world_size,
+        )
+        test_dl = _make_loader(
+            _PathDataset(val_paths, transform, val_latents_path), batch_size, False, num_workers,
+            True, False, rank, world_size,
+        )
+        print(
+            f"Stimuli — Train: {len(paths)} images from {data_dir} ({len(train_dl)} batches/epoch) | "
+            f"Val: {len(val_paths)} images from {val_dir} ({len(test_dl)} batches) | "
+            f"conditioning: precomputed latents"
+        )
+        return train_dl, test_dl
+
+    train_idx, test_idx = _split(len(paths), train_split, seed)
+    train_paths = [paths[i] for i in train_idx.tolist()]
+    test_paths  = [paths[i] for i in test_idx.tolist()]
+
     train_dl = _make_loader(
         _PathDataset(train_paths, transform), batch_size, shuffle_train, num_workers,
         True, shuffle_train, rank, world_size,
@@ -487,6 +562,9 @@ def build_dataloaders(cfg, rank: int = 0, world_size: int = 1) -> Tuple[DataLoad
             image_size=h,
             train_split=cfg.train_split,
             batch_size=cfg.batch_size,
+            latent_dim=getattr(cfg, "latent_dim", None),
+            unconditional=getattr(cfg, "unconditional", False),
+            val_data_dir=getattr(cfg, "val_data_dir", None),
             rank=rank, world_size=world_size,
         )
     elif dataset_type == "imagenet64":
