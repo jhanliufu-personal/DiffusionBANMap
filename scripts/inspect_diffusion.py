@@ -190,7 +190,8 @@ def main():
         # real images. Set --no-load_test_images to load *only* the latents and skip
         # val_images.npy entirely; set --load_test_images to also pull the matching
         # images for display / the one-step-prediction diagnostic.
-        val_latents_path = os.path.join(diff_cfg.data_dir, "val_latents.npy")
+        latents_suffix = f"latents_z{diff_cfg.latent_dim}.npy" if getattr(diff_cfg, "latent_dim", None) is not None else "latents.npy"
+        val_latents_path = os.path.join(diff_cfg.data_dir, f"val_{latents_suffix}")
         val_latents = np.load(val_latents_path, mmap_mode="r")
         val_images_path = os.path.join(diff_cfg.data_dir, "val_images.npy")
         val_images = np.load(val_images_path, mmap_mode="r")
