@@ -184,17 +184,37 @@ def main():
         else:
             print("load_test_images=False -- skipping all image loading (unconditional sampling only)")
     else:
-        # Conditional on precomputed latents -- z always comes from val_latents.npy
-        # (row-aligned with val_images.npy, same convention as data_utils.py's
-        # _ImageNet64ArrayDataset), so unlike beta-VAE conditioning this never needs the
-        # real images. Set --no-load_test_images to load *only* the latents and skip
-        # val_images.npy entirely; set --load_test_images to also pull the matching
-        # images for display / the one-step-prediction diagnostic.
+        # Conditional on precomputed latents -- z always comes from val_latents.npy.
+        # ImageNet64 layout: val_images.npy is a consolidated (N,3,64,64) array, row-aligned
+        # with val_latents_z{dim}.npy, both directly in data_dir (_ImageNet64ArrayDataset
+        # convention). Stimuli layout has no such array: val_latents_z{dim}.npy still lives
+        # in data_dir, but is row-aligned with a *separate* folder of files, val_data_dir
+        # (defaulting to data_dir's sibling "500Stimuli") -- same convention as
+        # data_utils.build_stimuli_dataloaders. Detected here purely from whether
+        # val_images.npy exists on disk, mirroring how data_utils.py auto-detects layout.
         latents_suffix = f"latents_z{diff_cfg.latent_dim}.npy" if getattr(diff_cfg, "latent_dim", None) is not None else "latents.npy"
         val_latents_path = os.path.join(diff_cfg.data_dir, f"val_{latents_suffix}")
         val_latents = np.load(val_latents_path, mmap_mode="r")
+
         val_images_path = os.path.join(diff_cfg.data_dir, "val_images.npy")
-        val_images = np.load(val_images_path, mmap_mode="r")
+        val_images_are_paths = not os.path.exists(val_images_path)
+        if not val_images_are_paths:
+            val_images = np.load(val_images_path, mmap_mode="r")
+        else:
+            import glob
+            exts = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
+            val_data_dir = getattr(diff_cfg, "val_data_dir", None) or os.path.join(
+                os.path.dirname(os.path.normpath(diff_cfg.data_dir)), "500Stimuli"
+            )
+            val_images = sorted(
+                p for p in glob.glob(os.path.join(val_data_dir, "**", "*"), recursive=True)
+                if os.path.splitext(p)[1].lower() in exts and "Zone.Identifier" not in p
+            )
+            if len(val_images) != len(val_latents):
+                raise ValueError(
+                    f"val_latents ({len(val_latents)} rows, {val_latents_path}) / val images "
+                    f"({len(val_images)}, {val_data_dir}) count mismatch"
+                )
         print("Loaded precomputed latents + matching real images")
 
     # --- Noise schedule ---
@@ -231,11 +251,23 @@ def main():
         idx = random.sample(range(len(val_latents)), min(args.n_samples, len(val_latents)))
         sampled_latents = torch.from_numpy(np.array(val_latents[idx])).float().to(device)
 
-        originals = torch.from_numpy(np.array(val_images[idx])).float().to(device) / 255.0
-        if diff_cfg.image_size != originals.shape[-1]:
-            originals = torch.nn.functional.interpolate(
-                originals, size=diff_cfg.image_size, mode="bilinear", align_corners=False
-            )
+        if val_images_are_paths:
+            from torchvision import transforms
+            from PIL import Image
+
+            transform = transforms.Compose([
+                transforms.Resize((diff_cfg.image_size, diff_cfg.image_size)),
+                transforms.ToTensor(),
+            ])
+            originals = torch.stack(
+                [transform(Image.open(val_images[i]).convert("RGB")) for i in idx]
+            ).to(device)
+        else:
+            originals = torch.from_numpy(np.array(val_images[idx])).float().to(device) / 255.0
+            if diff_cfg.image_size != originals.shape[-1]:
+                originals = torch.nn.functional.interpolate(
+                    originals, size=diff_cfg.image_size, mode="bilinear", align_corners=False
+                )
 
     with torch.no_grad():
         if args.unconditional:
