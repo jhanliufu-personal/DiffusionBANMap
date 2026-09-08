@@ -42,7 +42,7 @@ eval_interval: 200
 # ImageNet64 uncond flow model, no grad accumulation (grad_accum_steps=1, predates that
 # feature), trained for 15000 steps — unconditional sampling from this checkpoint alone
 # produces incoherent objects and unrealistic layouts; finetuning here is expected to fix that.
-resume_ckpt_path: outputs/diffusion_full_imagenet64_flow_h64_mc192_ch1x2x3x4_T1000_flow_z50/checkpoints/ckpt_step_0225000.pt
+resume_ckpt_path: outputs/diffusion_full_imagenet64_flow_grad_accum_ema_h64_mc192_ch1x2x3x4_T1000_flow_z50/checkpoints/ckpt_step_0225000.pt
 # This checkpoint is from a different experiment (the ImageNet64 pretrain, saved at its own
 # step ~12000+) — treat it as weight/optimizer/EMA initialization for a new experiment rather
 # than resuming that run, so num_steps above is *this* experiment's own budget instead of an
