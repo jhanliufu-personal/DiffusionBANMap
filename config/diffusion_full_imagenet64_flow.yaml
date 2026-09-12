@@ -51,5 +51,5 @@ num_steps: 500000
 ckpt_interval: 25000  # uniform checkpoint every 25k steps (20 total) for a FID-vs-compute curve
 log_interval: 100
 eval_interval: 400
-resume_ckpt_path: outputs/diffusion_full_imagenet64_flow_grad_accum_ema_h64_mc192_ch1x2x3x4_T1000_flow_z50/checkpoints/ckpt_step_0200000.pt
-reset_step_on_resume: false
+# resume_ckpt_path: outputs/diffusion_full_imagenet64_flow_grad_accum_ema_h64_mc192_ch1x2x3x4_T1000_flow_z50/checkpoints/ckpt_step_0200000.pt
+# reset_step_on_resume: false
