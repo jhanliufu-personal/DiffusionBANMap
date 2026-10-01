@@ -1,118 +1,199 @@
 # DiffusionBANMap
 
-Generating natural images from IT neuron activations using diffusion models, leveraging the axis-tuning correspondence between beta-VAE latents and IT neurons.
+Generating natural images from IT neuron activations with diffusion models. Images are encoded into a low-dimensional latent (top PCs of AlexNet fc6 / CLIP / DINO embeddings, or a beta-VAE latent), a pixel-space diffusion model is trained to generate images conditioned on that latent, and neuron firing rates are mapped linearly into the same latent space.
 
 ---
 
-## Beta-VAE Architecture
+## Installation
 
-A convolutional VAE with a strengthened KL penalty ($\beta > 1$).
+Requires Python >= 3.11.
 
-**Encoder:** 4 stride-2 Conv layers → FC(256) → outputs $\mu$ and $\log \sigma^2$ per latent dim  
-**Decoder:** FC projection → 4 transposed Conv layers → reconstructed image  
-**Latent:** $z = \mu + \sigma \cdot \varepsilon$ via reparameterization; typically 10–50 dimensions  
-**Loss:**
+```bash
+# with uv (uses pyproject.toml)
+uv sync
+source .venv/bin/activate
 
-$$\mathcal{L} = \mathbb{E}_{q}[\log p(x|z)] - \beta \cdot D_{\mathrm{KL}}\!\left(q(z|x) \,\|\, \mathcal{N}(0, I)\right)$$
+# or with pip
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+```
 
-The $\beta$ penalty (typically 4–10) forces latent dimensions to be statistically independent, pressuring each unit to align with a distinct, non-overlapping axis in representation space.
+For a specific CUDA build, install `torch` / `torchvision` from the matching PyTorch wheel index first. Training logs to Weights & Biases and needs `WANDB_API_KEY` set in the environment.
 
----
-
-## Axis Tuning of Beta-VAE Latents
-
-Each beta-VAE latent unit exhibits a **preferred axis** in the feature space of pretrained models (AlexNet fc6, VGG16/19, DINO-ViT): a linear direction that best predicts that unit's activation across images. This is quantified by:
-
-- **Explained variance (EV):** how well the linear projection onto the preferred axis predicts the unit's response (leave-one-out cross-validated)
-- **Selectivity index:** $\dfrac{\mathrm{EV}_{\mathrm{pref}} - \mathrm{EV}_{\mathrm{orth}}}{\mathrm{EV}_{\mathrm{pref}} + \mathrm{EV}_{\mathrm{orth}}}$ — high values mean the unit is specifically tuned to its axis
-- **Axis orthogonality:** low pairwise cosine similarity between preferred axes of different units, reflecting disentanglement
-
-This property is expected from beta-VAE's training objective and would not hold as strongly in a standard VAE ($\beta = 1$), which lacks the pressure to align each unit with an independent, orthogonal direction.
-
-Critically, **IT cortex neurons show the same axis-tuning property in the same embedding spaces**, establishing a correspondence between beta-VAE latents and neural representations.
+All scripts are run as modules from the repo root (`python -m scripts.<name>`), so that `models/`, `data_utils.py` and `utils.py` resolve.
 
 ---
 
-## Goal: Neuron-Guided Image Generation with Superstimuli
+## Directory structure
 
-Given a target neuron $i$ with preferred axis $\mathbf{a}_i$ in AlexNet space, generate a natural image that:
-1. Activates neuron $i$ more strongly than a baseline image
-2. Leaves other neurons $j \neq i$ approximately unchanged
+```
+DiffusionBANMap/
+├── config/            # YAML configs, one per experiment (diffusion_*.yaml, betavae_*.yaml)
+├── models/            # unet.py, noise_process.py (DDPM / flow / VP-SDE), ema.py, beta_vae.py
+├── scripts/           # entry points, see "Common commands"
+├── notebooks/         # Colab versions of the scripts + inspection notebooks
+├── analysis/          # axis-tuning and firing-rate -> latent analyses
+├── data_utils.py      # dataloaders and conditioning-latent lookup
+├── utils.py           # samplers, schedules, run naming
+├── data/              # not tracked
+└── outputs/           # not tracked
+```
 
-Because beta-VAE latent dimensions are axis-aligned with neurons, scaling latent dimension $i$ moves the image's AlexNet embedding along $\mathbf{a}_i$ while orthogonal axes remain fixed — making superstimulus generation a natural operation.
+`data/` and `outputs/` are git-ignored. The code assumes this layout inside them:
 
----
+```
+data/
+├── imagenet64/                              # data_dir for dataset_type: imagenet64
+│   ├── train_images.npy                     #   (1,281,167, 3, 64, 64) uint8
+│   └── val_images.npy                       #   (50,000, 3, 64, 64) uint8
+├── imagenet64_{encoder}_pca_latents/        # conditioning latents, next to data_dir
+│   ├── train_embeddings.npy                 #   full un-PCA'd embeddings (encode once)
+│   ├── val_embeddings.npy
+│   ├── train_latents_z{N}.npy               #   top-N PCs, row-aligned with the images
+│   ├── val_latents_z{N}.npy
+│   └── {encoder}_scaler_z{N}.joblib, {encoder}_pca_z{N}.joblib, manifest_z{N}.json
+├── 15901Stimuli/                            # data_dir for dataset_type: stimuli (train images)
+├── 500Stimuli/                              # held-out stimuli (val images)
+├── stimuli_{encoder}_pca_latents/           # same contents as the imagenet64 one
+└── stimuli_{encoder}_latents/               # raw (no PCA) embeddings, e.g. sd_vae, clip_vit_l14
 
-## Methods
+outputs/
+└── {output_dir}_{run tag}/                  # e.g. ..._T1000_flow_alexnet_fc6_z200
+    ├── config.json
+    ├── checkpoints/                         # best_ckpt.pt, ckpt_step_0025000.pt, ...
+    ├── visualizations/
+    ├── fid_eval/                            # written by calculate_fid_sweep
+    └── inspection/                          # written by inspect_diffusion
+```
 
-### Training-Free
+The run tag is built from the config (image size, channels, noise process, latent dim), and includes the encoder name for runs conditioned on precomputed latents.
 
-**1. Classifier Guidance via Preferred Axis**
+### How a config picks its conditioning
 
-Uses the differentiable neuron model $\hat{y}_i = \mathbf{a}_i \cdot f(x)$ (where $f$ = AlexNet) as a gradient signal into a pretrained diffusion model.
+| Config keys | Conditioning |
+|---|---|
+| `unconditional: true` | none (z is a zero vector) |
+| `encoding_model: <encoder>` + `latent_dim: N` | precomputed latents from `<data_dir>/../{dataset_type}_{encoder}_pca_latents/{train,val}_latents_z{N}.npy`; an error if the files are missing |
+| `betavae_config_path` + `betavae_ckpt_path` | beta-VAE latents, encoded on the fly |
 
-1. Start from noise or SDEdit (add noise to baseline image at intermediate $t$)
-2. At each denoising step, estimate clean image $\hat{x}_0$ from $x_t$ via DDIM posterior
-3. Compute guidance objective:
-
-$$\mathcal{L} = -\mathbf{a}_i \cdot f(\hat{x}_0) \;+\; \lambda \sum_{j \neq i} \left| \mathbf{a}_j \cdot f(\hat{x}_0) - \mathbf{a}_j \cdot f(x_{\mathrm{baseline}}) \right|^2$$
-
-   First term increases target neuron; second pins other neurons near baseline
-
-4. Backprop $\nabla_{x_t} \mathcal{L}$ and add scaled gradient to the denoising update
-5. For superstimuli: increase the coefficient on the first term
-
-No training required — only the pretrained diffusion model and precomputed preferred axes.
-
-**2. Score Distillation Sampling (SDS) + Neuron Objective**
-
-1. Parameterize the output image via SD's VAE latent
-2. Optimize: $\mathcal{L} = -\mathbf{a}_i \cdot f(x) + \lambda \cdot \mathcal{L}_{\mathrm{SDS}}(x)$ where $\mathcal{L}_{\mathrm{SDS}}$ keeps $x$ on the natural image manifold
-3. The SDS gradient acts as a naturalness regularizer; the neuron term drives selectivity
-
----
-
-### Training-Required
-
-**3. Pixel-Space Diffusion Conditioned on Beta-VAE Latent** *(most principled)*
-
-Since beta-VAE latents and neurons share a coordinate system, superstimuli are exact by construction. The pipeline is:
-
-$$\text{neuron firing rates} \xrightarrow{\text{linear map (axis-tuning)}} z \in \mathbb{R}^N \xrightarrow{p(x \mid z),\ \text{diffusion}} \text{natural image}$$
-
-The beta-VAE decoder alone produces blurry images because a low-dimensional $z$ cannot encode all high-frequency detail; a deterministic decoder averages over that ambiguity. A diffusion model conditioned on $z$ instead models $p(x \mid z)$, stochastically generating sharp, natural images consistent with the latent code.
-
-1. Encode all training images to beta-VAE latents $z \in \mathbb{R}^N$ ($N$ = 10–50)
-2. Train a pixel-space diffusion model conditioned on $z$: given $z$, denoise from $\mathcal{N}(0, I)$ to a full-resolution natural image
-3. The linear map from neuron firing rates to $z$ is precomputed from the axis-tuning analysis — no neural data needed if using beta-VAE latents directly
-4. Superstimulus: set $z_i \to z_i + \Delta$, $z_j$ fixed for $j \neq i$, then generate
-
-Selectivity is structurally guaranteed by beta-VAE disentanglement, not just encouraged.
-
-**Validation:** Re-encode the generated superstimulus with the beta-VAE encoder and check that only the targeted dimension changed. Because the diffusion model is stochastic, re-encoding won't recover $z$ exactly, so the check is quantitative: the change in $\hat{z}_i$ should be large relative to changes in all other dimensions. A natural metric is:
-
-$$R_i = \frac{|\hat{z}_i - z_i|}{\frac{1}{N-1}\sum_{j \neq i} |\hat{z}_j - z_j|}$$
-
-$R_i \gg 1$ across many superstimulus trials indicates the diffusion model respects the latent structure.
-
-**4. Adapter / ControlNet Conditioned on Neuron Activation Vector**
-
-Train a lightweight adapter mapping neuron activations into the conditioning space of a frozen pretrained diffusion model.
-
-1. Collect paired data: (natural images, IT neuron response vectors) or use beta-VAE latents as proxy
-2. Train a small MLP encoder $E: \mathbb{R}^N \to \mathbb{R}^{768}$ projecting neuron vectors to the diffusion model's cross-attention space (IP-Adapter or ControlNet style); keep diffusion U-Net frozen
-3. At inference: pass neuron vector with dimension $i$ amplified as the conditioning signal
-4. Superstimulus: modify only $z_i$ in the conditioning vector, run conditioned generation
+Available encoders: `alexnet_fc6`, `clip_vit_b32`, `clip_vit_l14`, `dino_vitb16`, `dinov2_vits14`, `dinov2_vitb14`, `dinov2_vitl14`, `sd_vae` (no PCA; used for the Stable Diffusion experiments).
 
 ---
 
-## Comparison
+## Common commands
 
-| | Classifier Guidance | SDS | LDM in beta-VAE space | Adapter / ControlNet |
-|---|---|---|---|---|
-| Training cost | None | None | Moderate | Low |
-| Image quality | Limited by guidance noise | Moderate | High | High (pretrained SD quality) |
-| Superstimulus precision | Approximate | Approximate | Exact by construction | Good |
-| Selectivity control | $\lambda$ tuning | $\lambda$ tuning | Direct: scale $z_i$ | Conditioning vector |
+### 1. Prepare ImageNet64
 
-**Recommended path:** Use classifier guidance to validate the concept; move to LDM-in-beta-VAE-space for principled, high-quality superstimulus generation.
+Download the three Downsampled ImageNet 64x64 zips from image-net.org (login required), then consolidate them into `train_images.npy` / `val_images.npy`:
+
+```bash
+python scripts/prepare_imagenet64_dataset.py \
+    --drive_train_part1_zip path/to/Imagenet64_train_part1.zip \
+    --drive_train_part2_zip path/to/Imagenet64_train_part2.zip \
+    --drive_val_zip         path/to/Imagenet64_val.zip \
+    --data_dir data/imagenet64
+```
+
+### 2. Encode images into conditioning latents
+
+```bash
+# ImageNet64, DINOv2 ViT-B/14, top 200 PCs
+python -m scripts.extract_image_embeddings \
+    --model dinov2_vitb14 \
+    --dataset imagenet64 --data-dir data/imagenet64 \
+    --n-components 200 --subsample-size 50000
+
+# Stimuli, AlexNet fc6, top 50 PCs (PCA fit on the train folder)
+python -m scripts.extract_image_embeddings \
+    --model alexnet_fc6 \
+    --train-data-dir data/15901Stimuli --data-dir data/500Stimuli \
+    --n-components 50
+```
+
+Output goes to `data/{dataset}_{model}_pca_latents/`. The full embeddings are saved there too, so running again with a different `--n-components` only re-fits PCA and does not re-encode the images. Without `--n-components` the raw embeddings are saved to `data/{dataset}_{model}_latents/{split}_latents.npy`.
+
+### 3. Train a diffusion model
+
+```bash
+export WANDB_API_KEY=...
+
+# conditional on precomputed latents (encoding_model + latent_dim in the config)
+python -m scripts.diffusion_train --config config/diffusion_full_imagenet64_flow.yaml
+
+# unconditional
+python -m scripts.diffusion_train --config config/diffusion_full_imagenet64_flow_uncond.yaml
+
+# resume
+python -m scripts.diffusion_train --config config/diffusion_full_imagenet64_flow.yaml \
+    --resume outputs/<run>/checkpoints/ckpt_step_0200000.pt
+```
+
+All visible GPUs are used automatically (DDP, no `torchrun` needed). `--run_name` and `--notes` annotate the wandb run. Finetuning on the stimuli from an ImageNet64 checkpoint is configured through `resume_ckpt_path` + `reset_step_on_resume: true`, see `config/diffusion_full_stimuli_finetune_flow.yaml`.
+
+### 4. FID over a checkpoint sweep
+
+```bash
+python -m scripts.calculate_fid_sweep --config config/diffusion_full_imagenet64_flow.yaml \
+    --n_fid_samples 50000 --num_inference_steps 100 --guidance_scale 1.0
+```
+
+Evaluates every `checkpoints/ckpt_step_*.pt` of the run (EMA weights by default, `--no_ema` to disable) and writes per-checkpoint samples, features and scores plus `fid_summary.yaml` into `<run>/fid_eval/`. `notebooks/fid_vs_step.ipynb` plots the result.
+
+### 5. Inspect a checkpoint
+
+```bash
+# unconditional (default)
+python -m scripts.inspect_diffusion \
+    --diffusion_config_path config/diffusion_full_imagenet64_flow_uncond.yaml
+
+# conditional: compare samples against the val images their latents came from
+python -m scripts.inspect_diffusion \
+    --diffusion_config_path config/diffusion_full_imagenet64_flow.yaml \
+    --no-unconditional --guidance_scale 2.0
+```
+
+Loads `best_ckpt.pt` unless `--diffusion_ckpt_path` is given, and saves one-step predictions, final samples and a denoising progression into `<run>/inspection/`.
+
+### 6. Stable Diffusion with CLIP-image conditioning
+
+Uses a pretrained SD 1.x image-variations checkpoint instead of this repo's UNet: SD-VAE latents are partially re-noised and denoised conditioned on CLIP ViT-L/14 image embeddings.
+
+```bash
+# encode the stimuli: SD-VAE latents [N, 4, 64, 64] and CLIP ViT-L/14 embeddings [N, 768]
+python -m scripts.extract_image_embeddings --model sd_vae       --data-dir data/500Stimuli
+python -m scripts.extract_image_embeddings --model clip_vit_l14 --data-dir data/500Stimuli
+
+# reference run: real latents + real CLIP embeddings
+python -m scripts.sd_clip_img2img \
+    --latents_path data/stimuli_sd_vae_latents/val_latents.npy \
+    --cond_path data/stimuli_clip_vit_l14_latents/val_latents.npy \
+    --strength 0.6 --output_dir outputs/sd_clip_img2img
+
+# control: pure noise start, no conditioning
+python -m scripts.sd_clip_img2img --pure_noise_start --null_cond --n 8 \
+    --strength 1.0 --guidance_scale 1.0 --output_dir outputs/sd_clip_img2img_debug
+
+# score every degraded setup against the reference run
+python -m scripts.sd_conditioning_eval --output_dir outputs/sd_clip_img2img \
+    --metrics mse,psnr,ssim,clip_cosine
+```
+
+Latents or CLIP embeddings regressed from firing rates (`analysis/firing_rate_to_latent.ipynb`) are passed through the same `--latents_path` / `--cond_path` flags. `sd_clip_img2img` always writes `denoised_images.pt`; for the eval, rename each non-reference run's file to `{tag}_denoised_images.pt` in the same directory (known tags are listed in `TAG_LABELS` in `scripts/sd_conditioning_eval.py`).
+
+### 7. Beta-VAE (legacy)
+
+```bash
+python -m scripts.betavae_train --config config/betavae_full_stimuli.yaml
+```
+
+---
+
+## Background
+
+The project started from the observation that beta-VAE latent units and IT neurons are both **axis-tuned** in the feature space of pretrained networks (AlexNet fc6, VGG, DINO-ViT): each unit's response is well predicted by projecting the image embedding onto a single preferred axis, and the beta-VAE's strengthened KL penalty ($\beta > 1$) pushes those axes towards orthogonality. That shared coordinate system suggests the pipeline
+
+$$\text{neuron firing rates} \xrightarrow{\text{linear map}} z \xrightarrow{p(x \mid z),\ \text{diffusion}} \text{natural image}$$
+
+A beta-VAE decoder alone gives blurry images because a low-dimensional $z$ cannot carry high-frequency detail; a diffusion model conditioned on $z$ instead samples sharp images consistent with it. A **superstimulus** for neuron $i$ is then generated by increasing $z_i$ while holding the other dimensions fixed, and checked by re-encoding the output and confirming that only the targeted dimension moved. In practice the beta-VAE latent has largely been replaced by the top PCs of pretrained embeddings (AlexNet fc6, CLIP, DINO), which neurons are linearly mapped into in the same way.
+
+Alternatives considered alongside this trained, latent-conditioned model: training-free **classifier guidance**, which backpropagates the neuron model $\hat{y}_i = \mathbf{a}_i \cdot f(x)$ through a pretrained diffusion model at each denoising step while penalizing changes in other neurons; **score distillation** with the same neuron objective as the driving term; and a lightweight **adapter** that maps neuron vectors into the conditioning space of a frozen pretrained diffusion model, which is the direction the Stable Diffusion + CLIP experiments above explore. The training-free methods cost nothing to set up but give only approximate selectivity; the conditioned model gives direct control by editing $z$.

@@ -28,7 +28,8 @@ cfg_uncond_prob: 0.1
 # Conditioning latents: {train,val}_latents_z{latent_dim}.npy in
 # <data_dir>/../{dataset_type}_{encoding_model}_pca_latents, written by
 # scripts/extract_image_embeddings.py (--model takes the same names as encoding_model).
-encoding_model: alexnet_fc6
+# encoding_model: alexnet_fc6
+encoding_model: dinov2_vitb14
 latent_dim: 200
 
 # Optimizer
