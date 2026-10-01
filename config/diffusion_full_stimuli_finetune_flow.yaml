@@ -23,7 +23,11 @@ unconditional: false
 noise_process: flow
 num_timesteps: 1000        # sinusoidal embedding scale only; flow itself uses t in [0,1]
 cfg_uncond_prob: 0.0
-latent_dim: 50               # unused (z is a zero vector) since unconditional: true
+# Conditioning latents: {train,val}_latents_z{latent_dim}.npy in
+# <data_dir>/../{dataset_type}_{encoding_model}_pca_latents, written by
+# scripts/extract_image_embeddings.py (--model takes the same names as encoding_model).
+encoding_model: alexnet_fc6
+latent_dim: 50
 
 # Optimizer
 lr: 1.0e-5

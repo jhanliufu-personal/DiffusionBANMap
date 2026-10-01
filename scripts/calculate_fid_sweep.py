@@ -121,11 +121,16 @@ def main() -> None:
         vae.load_state_dict(vae_ckpt["model_state_dict"])
         vae.eval()
         print(f"beta-VAE loaded (step {vae_ckpt['step']})")
-    else:
-        # Conditional, but no VAE configured -- z comes from precomputed latents handed
-        # back by the dataloader (see data_utils.py) instead of vae.encode().
+    elif getattr(diff_cfg, "encoding_model", None) is not None:
+        # Conditional on precomputed latents -- z comes from the latents handed back by
+        # the dataloader (see data_utils.resolve_latents_paths) instead of vae.encode().
         vae = None
-        print("Conditional on precomputed latents -- no VAE to load, z comes from the dataloader")
+        print(f"Conditional on precomputed {diff_cfg.encoding_model} latents -- no VAE to load, z comes from the dataloader")
+    else:
+        raise ValueError(
+            "Conditional config with nothing to condition on: set encoding_model (precomputed "
+            "latents), betavae_config_path (on-the-fly VAE latents), or unconditional: true"
+        )
 
     ckpt_dir = args.ckpt_dir or os.path.join(diff_cfg.output_dir, "checkpoints")
     ckpt_paths = sorted(glob.glob(os.path.join(ckpt_dir, args.ckpt_pattern)))
@@ -172,6 +177,7 @@ def main() -> None:
             batch_size=diff_cfg.batch_size,
             latent_dim=getattr(diff_cfg, "latent_dim", None),
             unconditional=unconditional,
+            encoding_model=getattr(diff_cfg, "encoding_model", None),
         )
     else:
         _, val_dl = build_dataloaders(diff_cfg)

@@ -36,6 +36,7 @@ from models.beta_vae import BetaVAE
 from models.unet import UNet
 from models.ema import ema_shadow_to_model_state_dict
 from models.noise_process import DDPM, RectifiedFlow, VPSDE
+from data_utils import resolve_latents_paths
 from utils import discover_device, make_noise_schedule, diffusion_sample, flow_sample, vpsde_sample, make_run_tag
 
 
@@ -112,13 +113,17 @@ def main():
         vae.load_state_dict(vae_ckpt["model_state_dict"])
         vae.eval()
         print(f"beta-VAE loaded (step {vae_ckpt['step']})")
-    else:
-        # Conditional, but no VAE configured -- the diffusion model was trained on
-        # precomputed latents (e.g. AlexNet-fc6-PCA), row-aligned with val_images.npy, so
-        # z is looked up from val_latents.npy instead of vae.encode() (see "Load images"
-        # below).
+    elif getattr(diff_cfg, "encoding_model", None) is not None:
+        # Conditional on precomputed latents (e.g. AlexNet-fc6-PCA), row-aligned with the
+        # val images, so z is looked up from val_latents_z{dim}.npy instead of vae.encode()
+        # (see "Load images" below).
         vae = None
-        print("Conditional on precomputed latents -- no VAE to load, z comes from val_latents.npy")
+        print(f"Conditional on precomputed {diff_cfg.encoding_model} latents -- no VAE to load, z comes from val_latents")
+    else:
+        raise ValueError(
+            "Conditional config with nothing to condition on: set encoding_model (precomputed "
+            "latents), betavae_config_path (on-the-fly VAE latents), or pass --unconditional"
+        )
 
     # --- UNet ---
     unet = UNet(
@@ -184,16 +189,19 @@ def main():
         else:
             print("load_test_images=False -- skipping all image loading (unconditional sampling only)")
     else:
-        # Conditional on precomputed latents -- z always comes from val_latents.npy.
-        # ImageNet64 layout: val_images.npy is a consolidated (N,3,64,64) array, row-aligned
-        # with val_latents_z{dim}.npy, both directly in data_dir (_ImageNet64ArrayDataset
-        # convention). Stimuli layout has no such array: val_latents_z{dim}.npy still lives
-        # in data_dir, but is row-aligned with a *separate* folder of files, val_data_dir
-        # (defaulting to data_dir's sibling "500Stimuli") -- same convention as
+        # Conditional on precomputed latents -- z always comes from val_latents_z{dim}.npy
+        # in data_dir's sibling {dataset_type}_{encoding_model}_pca_latents directory (see
+        # data_utils.resolve_latents_paths).
+        # ImageNet64 layout: val_images.npy in data_dir is a consolidated (N,3,64,64) array,
+        # row-aligned with the latents (_ImageNet64ArrayDataset convention). Stimuli layout
+        # has no such array: the latents are row-aligned with a *separate* folder of files,
+        # val_data_dir (defaulting to data_dir's sibling "500Stimuli") -- same convention as
         # data_utils.build_stimuli_dataloaders. Detected here purely from whether
-        # val_images.npy exists on disk, mirroring how data_utils.py auto-detects layout.
-        latents_suffix = f"latents_z{diff_cfg.latent_dim}.npy" if getattr(diff_cfg, "latent_dim", None) is not None else "latents.npy"
-        val_latents_path = os.path.join(diff_cfg.data_dir, f"val_{latents_suffix}")
+        # val_images.npy exists on disk.
+        val_latents_path = resolve_latents_paths(
+            diff_cfg.data_dir, diff_cfg.dataset_type, diff_cfg.encoding_model, diff_cfg.latent_dim,
+            splits=("val",),
+        )[0]
         val_latents = np.load(val_latents_path, mmap_mode="r")
 
         val_images_path = os.path.join(diff_cfg.data_dir, "val_images.npy")

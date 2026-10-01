@@ -109,7 +109,7 @@ class _ImageNet64ArrayDataset(Dataset):
 
     If latents_path is given (an (N, latent_dim) array whose row i is the precomputed
     conditioning latent for image row i — e.g. AlexNet-fc6-PCA latents written by
-    notebooks/alexnet_pca_latents.ipynb), __getitem__ returns (image, latent) tuples
+    scripts/extract_image_embeddings.py), __getitem__ returns (image, latent) tuples
     instead of a plain image tensor.
     """
 
@@ -156,6 +156,41 @@ def _split(n: int, train_split: float, seed: int) -> Tuple[torch.Tensor, torch.T
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
+
+# ── Precomputed conditioning latents ──────────────────────────────────────────
+
+def latents_dir_for(data_dir: str, dataset_type: str, encoding_model: str) -> str:
+    """Directory holding the PCA-reduced `encoding_model` embeddings of a dataset:
+    {dataset_type}_{encoding_model}_pca_latents, next to data_dir (e.g. data/imagenet64 ->
+    data/imagenet64_alexnet_fc6_pca_latents). Written by scripts/extract_image_embeddings.py.
+    """
+    parent = os.path.dirname(os.path.normpath(data_dir))
+    return os.path.join(parent, f"{dataset_type}_{encoding_model}_pca_latents")
+
+
+def resolve_latents_paths(
+    data_dir: str,
+    dataset_type: str,
+    encoding_model: str,
+    latent_dim: int,
+    splits: Tuple[str, ...] = ("train", "val"),
+) -> List[str]:
+    """Return the {split}_latents_z{latent_dim}.npy path for each split, inside
+    latents_dir_for(...). The dim suffix lets multiple PCA dimensionalities of the same
+    encoder coexist in one directory. Raises if a file is missing -- an explicitly
+    requested encoding_model never silently falls back to unconditional/VAE conditioning.
+    """
+    latents_dir = latents_dir_for(data_dir, dataset_type, encoding_model)
+    paths = [os.path.join(latents_dir, f"{split}_latents_z{latent_dim}.npy") for split in splits]
+    missing = [p for p in paths if not os.path.exists(p)]
+    if missing:
+        raise FileNotFoundError(
+            f"encoding_model={encoding_model!r}, latent_dim={latent_dim}: missing {', '.join(missing)} — "
+            f"run scripts/extract_image_embeddings.py --model {encoding_model} --dataset {dataset_type} "
+            f"--n-components {latent_dim} first"
+        )
+    return paths
+
 
 def build_face_dataloaders(
     data_dir: str,
@@ -302,6 +337,7 @@ def build_imagenet64_dataloaders(
     shuffle_train: bool = True,
     latent_dim: Optional[int] = None,
     unconditional: bool = False,
+    encoding_model: Optional[str] = None,
     rank: int = 0,
     world_size: int = 1,
 ) -> Tuple[DataLoader, DataLoader]:
@@ -313,14 +349,13 @@ def build_imagenet64_dataloaders(
     preloaded, since the full training set (~15 GB) can exceed a standard Colab
     runtime's RAM. Honors the benchmark's own train/val split.
 
-    If train_latents_z{latent_dim}.npy / val_latents_z{latent_dim}.npy are also present in
-    data_dir (written by notebooks/alexnet_pca_latents.ipynb, row-aligned with
-    train_images.npy / val_images.npy — the dim suffix lets multiple PCA dimensionalities
-    coexist in the same data_dir), batches become (image, latent) tuples for
-    precomputed-latent conditioning instead of plain image tensors — this is detected
-    purely from what's on disk, unless unconditional=True, in which case latent detection
-    is skipped entirely so leftover latents files from a reused data_dir can never leak
-    into an unconditional run.
+    If encoding_model is given (e.g. "alexnet_fc6", "dinov2_vitb14"), batches become
+    (image, latent) tuples for precomputed-latent conditioning instead of plain image
+    tensors. The latents are train_latents_z{latent_dim}.npy / val_latents_z{latent_dim}.npy
+    in data_dir's sibling directory imagenet64_{encoding_model}_pca_latents (see
+    resolve_latents_paths; written by scripts/extract_image_embeddings.py, row-aligned with
+    train_images.npy / val_images.npy), and it is an error for them to be missing.
+    unconditional=True ignores encoding_model entirely.
 
     shuffle_train=False makes train_dl unshuffled with no dropped batch (val_dl already
     behaves this way) — for a full, order-preserving pass (row i in == row i out), e.g.
@@ -333,20 +368,11 @@ def build_imagenet64_dataloaders(
             f"Expected {train_path} and {val_path} — run scripts/prepare_imagenet64_dataset.py first"
         )
 
-    if unconditional:
-        train_latents_path = None
-        val_latents_path = None
-    else:
-        latents_suffix = f"latents_z{latent_dim}.npy" if latent_dim is not None else "latents.npy"
-        train_latents_path = os.path.join(data_dir, f"train_{latents_suffix}")
-        val_latents_path = os.path.join(data_dir, f"val_{latents_suffix}")
-        train_latents_path = train_latents_path if os.path.exists(train_latents_path) else None
-        val_latents_path = val_latents_path if os.path.exists(val_latents_path) else None
-        if (train_latents_path is None) != (val_latents_path is None):
-            raise FileNotFoundError(
-                f"Found latents for one split but not the other in {data_dir} — expected both "
-                f"train_{latents_suffix} and val_{latents_suffix}, or neither."
-            )
+    train_latents_path = val_latents_path = None
+    if encoding_model is not None and not unconditional:
+        train_latents_path, val_latents_path = resolve_latents_paths(
+            data_dir, "imagenet64", encoding_model, latent_dim
+        )
 
     train_dl = _make_loader(
         _ImageNet64ArrayDataset(train_path, image_size, train_latents_path), batch_size,
@@ -373,6 +399,7 @@ def build_imagenet64_val_dataloader(
     num_workers: int = 4,
     latent_dim: Optional[int] = None,
     unconditional: bool = False,
+    encoding_model: Optional[str] = None,
 ) -> DataLoader:
     """Return just the val_dl half of build_imagenet64_dataloaders, without requiring
     train_images.npy to exist — for evaluation-only use (e.g. FID) that never touches the
@@ -384,12 +411,11 @@ def build_imagenet64_val_dataloader(
             f"Expected {val_path} — run scripts/prepare_imagenet64_dataset.py first"
         )
 
-    if unconditional:
-        val_latents_path = None
-    else:
-        latents_suffix = f"latents_z{latent_dim}.npy" if latent_dim is not None else "latents.npy"
-        val_latents_path = os.path.join(data_dir, f"val_{latents_suffix}")
-        val_latents_path = val_latents_path if os.path.exists(val_latents_path) else None
+    val_latents_path = None
+    if encoding_model is not None and not unconditional:
+        val_latents_path = resolve_latents_paths(
+            data_dir, "imagenet64", encoding_model, latent_dim, splits=("val",)
+        )[0]
 
     val_dl = DataLoader(
         _ImageNet64ArrayDataset(val_path, image_size, val_latents_path),
@@ -435,6 +461,7 @@ def build_stimuli_dataloaders(
     shuffle_train: bool = True,
     latent_dim: Optional[int] = None,
     unconditional: bool = False,
+    encoding_model: Optional[str] = None,
     val_data_dir: Optional[str] = None,
     rank: int = 0,
     world_size: int = 1,
@@ -443,25 +470,24 @@ def build_stimuli_dataloaders(
 
     Images are loaded on-the-fly and converted to RGB (handles grayscale TIFF).
 
-    If train_latents_z{latent_dim}.npy / val_latents_z{latent_dim}.npy are present in
-    data_dir (same naming convention as build_imagenet64_dataloaders), switches to
-    (image, latent) tuples for precomputed-latent conditioning -- detected purely from
-    what's on disk, unless unconditional=True, which skips latent detection entirely
-    (same guard as build_imagenet64_dataloaders) so leftover latents files from a reused
-    data_dir can never leak into an unconditional run.
+    If encoding_model is given, switches to (image, latent) tuples for precomputed-latent
+    conditioning, read from train_latents_z{latent_dim}.npy / val_latents_z{latent_dim}.npy
+    in data_dir's sibling directory stimuli_{encoding_model}_pca_latents (same convention
+    as build_imagenet64_dataloaders, see resolve_latents_paths). unconditional=True ignores
+    encoding_model entirely.
 
     Unlike imagenet64, this folder-of-files dataset has no separate on-disk train/val
     image arrays for the latents to already be split against -- e.g. for
     data/15901Stimuli, train_latents_z50.npy covers *all* 15901 images there, while
     val_latents_z50.npy covers a completely different, much smaller directory (this
     repo's canonical held-out stimulus set, data/500Stimuli). So when latents are
-    present: ALL of data_dir's images become train (row-aligned with
+    used: ALL of data_dir's images become train (row-aligned with
     train_latents_z{latent_dim}.npy in sorted-path order), and val images come from
     val_data_dir (default: the sibling directory "500Stimuli", e.g. data/500Stimuli next
     to data/15901Stimuli), row-aligned with val_latents_z{latent_dim}.npy. train_split
     and seed are ignored in this branch -- there's nothing left to split.
 
-    Without latents present, behaves as before: a single random train_split/seed split of
+    Without encoding_model, behaves as before: a single random train_split/seed split of
     data_dir's own images (test_dl is a held-out fraction of data_dir, not val_data_dir).
 
     shuffle_train=False makes train_dl unshuffled with no dropped batch (test_dl already
@@ -472,17 +498,10 @@ def build_stimuli_dataloaders(
         raise FileNotFoundError(f"No images found in {data_dir}")
 
     train_latents_path = val_latents_path = None
-    if not unconditional:
-        latents_suffix = f"latents_z{latent_dim}.npy" if latent_dim is not None else "latents.npy"
-        candidate_train = os.path.join(data_dir, f"train_{latents_suffix}")
-        candidate_val = os.path.join(data_dir, f"val_{latents_suffix}")
-        train_latents_path = candidate_train if os.path.exists(candidate_train) else None
-        val_latents_path = candidate_val if os.path.exists(candidate_val) else None
-        if (train_latents_path is None) != (val_latents_path is None):
-            raise FileNotFoundError(
-                f"Found latents for one split but not the other in {data_dir} — expected both "
-                f"train_{latents_suffix} and val_{latents_suffix}, or neither."
-            )
+    if encoding_model is not None and not unconditional:
+        train_latents_path, val_latents_path = resolve_latents_paths(
+            data_dir, "stimuli", encoding_model, latent_dim
+        )
 
     transform = transforms.Compose([
         transforms.Resize((image_size, image_size)),
@@ -564,6 +583,7 @@ def build_dataloaders(cfg, rank: int = 0, world_size: int = 1) -> Tuple[DataLoad
             batch_size=cfg.batch_size,
             latent_dim=getattr(cfg, "latent_dim", None),
             unconditional=getattr(cfg, "unconditional", False),
+            encoding_model=getattr(cfg, "encoding_model", None),
             val_data_dir=getattr(cfg, "val_data_dir", None),
             rank=rank, world_size=world_size,
         )
@@ -574,6 +594,7 @@ def build_dataloaders(cfg, rank: int = 0, world_size: int = 1) -> Tuple[DataLoad
             batch_size=cfg.batch_size,
             latent_dim=getattr(cfg, "latent_dim", None),
             unconditional=getattr(cfg, "unconditional", False),
+            encoding_model=getattr(cfg, "encoding_model", None),
             rank=rank, world_size=world_size,
         )
     else:

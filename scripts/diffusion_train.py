@@ -75,13 +75,18 @@ def main_worker(rank: int, world_size: int, args: argparse.Namespace) -> None:
             print("Unconditional — no VAE, z is a zero vector")
     elif hasattr(cfg, "betavae_config_path"):
         vae = _load_frozen_vae(cfg, device)
-    else:
-        # Conditional, but no VAE configured — the dataloader is expected to already
-        # provide precomputed latents (e.g. AlexNet-fc6-PCA, see
-        # notebooks/alexnet_pca_latents.ipynb) as (image, latent) pairs.
+    elif getattr(cfg, "encoding_model", None) is not None:
+        # Conditional on precomputed latents — the dataloader provides (image, latent)
+        # pairs from {dataset_type}_{encoding_model}_pca_latents (see
+        # data_utils.resolve_latents_paths, scripts/extract_image_embeddings.py).
         vae = None
         if is_main:
-            print("Conditional on precomputed latents — no VAE to load, expecting (image, latent) pairs from the dataloader")
+            print(f"Conditional on precomputed {cfg.encoding_model} latents — no VAE to load")
+    else:
+        raise ValueError(
+            "Conditional run with nothing to condition on: set encoding_model (precomputed "
+            "latents), betavae_config_path (on-the-fly VAE latents), or unconditional: true"
+        )
 
     model = UNet(
         in_channels=cfg.in_channels,

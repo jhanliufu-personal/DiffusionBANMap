@@ -30,7 +30,12 @@ def make_run_tag(cfg) -> str:
         sched = getattr(cfg, 'beta_schedule', np_type) if np_type == 'ddpm' else np_type
         
         uncond = "_uncond" if getattr(cfg, "unconditional", False) else ""
-        return f"h{cfg.image_size}_mc{cfg.model_channels}_ch{ch}_T{T}_{sched}{uncond}_z{cfg.latent_dim}"
+        # Runs conditioned on precomputed latents are also tagged with the encoder they
+        # came from, so e.g. alexnet_fc6 and dinov2_vitb14 runs at the same latent_dim
+        # don't share an output_dir.
+        encoder = getattr(cfg, "encoding_model", None)
+        encoder = f"_{encoder}" if encoder is not None and not uncond else ""
+        return f"h{cfg.image_size}_mc{cfg.model_channels}_ch{ch}_T{T}_{sched}{uncond}{encoder}_z{cfg.latent_dim}"
 
 
 def discover_device() -> Literal["cuda", "mps", "cpu"]:
