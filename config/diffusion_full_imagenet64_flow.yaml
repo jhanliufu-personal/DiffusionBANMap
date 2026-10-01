@@ -30,7 +30,7 @@ cfg_uncond_prob: 0.1
 # scripts/extract_image_embeddings.py (--model takes the same names as encoding_model).
 # encoding_model: alexnet_fc6
 encoding_model: dinov2_vitb14
-latent_dim: 200
+latent_dim: 50
 
 # Optimizer
 lr: 1.0e-4
