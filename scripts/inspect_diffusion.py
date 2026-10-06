@@ -208,6 +208,7 @@ def main():
             splits=("val",),
         )[0]
         val_latents = np.load(val_latents_path, mmap_mode="r")
+        print(f"Conditioning latents: {os.path.abspath(val_latents_path)}")
 
         val_images_path = os.path.join(diff_cfg.data_dir, "val_images.npy")
         val_images_are_paths = not os.path.exists(val_images_path)

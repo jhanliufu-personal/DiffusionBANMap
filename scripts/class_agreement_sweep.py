@@ -41,6 +41,7 @@ Run from repo root:
 
 import os
 import json
+import hashlib
 import types
 import argparse
 from datetime import datetime
@@ -101,9 +102,10 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def build_val_subset_loader(cfg, n_images: int, batch_size: int, seed: int) -> DataLoader:
+def build_val_subset_loader(cfg, n_images: int, batch_size: int, seed: int):
     """Unshuffled loader of (image, conditioning latent) pairs over a fixed random subset of
-    the run's val split -- the same images for every checkpoint and every rerun."""
+    the run's val split -- the same images for every checkpoint and every rerun. Also returns
+    the subset's row indices and the conditioning-latents file they come from."""
     if cfg.dataset_type == "imagenet64":
         # val-only: doesn't need train_images.npy on disk
         val_dl = build_imagenet64_val_dataloader(
@@ -115,7 +117,9 @@ def build_val_subset_loader(cfg, n_images: int, batch_size: int, seed: int) -> D
     dataset = val_dl.dataset
     rng = np.random.default_rng(seed)
     idx = np.sort(rng.choice(len(dataset), size=min(n_images, len(dataset)), replace=False))
-    return DataLoader(Subset(dataset, idx.tolist()), batch_size=batch_size, shuffle=False, num_workers=4)
+    latents_path = os.path.abspath(dataset.latents.filename)   # np.load(mmap_mode="r") memmap
+    loader = DataLoader(Subset(dataset, idx.tolist()), batch_size=batch_size, shuffle=False, num_workers=4)
+    return loader, idx, latents_path
 
 
 def load_classifier(name: str, device):
@@ -213,7 +217,8 @@ def main() -> None:
     os.makedirs(eval_dir, exist_ok=True)
 
     # --- val subset: originals + their conditioning latents, shared across checkpoints ---
-    subset_dl = build_val_subset_loader(cfg, args.n_images, args.batch_size, args.seed)
+    subset_dl, subset_idx, latents_path = build_val_subset_loader(cfg, args.n_images, args.batch_size, args.seed)
+    print(f"Conditioning latents: {latents_path}")
     originals, latents = [], []
     for imgs, z in subset_dl:
         originals.append(imgs)
@@ -255,6 +260,26 @@ def main() -> None:
                                 guidance_scale=args.guidance_scale)
         raise ValueError(f"Unknown noise_process: {np_type!r}")
 
+    def fingerprint(ckpt_path: str) -> dict:
+        """Everything the generated images depend on. A cached _generated.pt / yaml is only
+        reused if its fingerprint matches, so changing the latents file, image subset, sampling
+        settings, or overwriting a checkpoint can never silently pair stale generations with
+        the current originals."""
+        stat = os.stat(ckpt_path)
+        return {
+            "latents_path": latents_path,
+            "latents_mtime": int(os.stat(latents_path).st_mtime),
+            "subset_sha1": hashlib.sha1(subset_idx.tobytes()).hexdigest()[:16],
+            "ckpt_size": int(stat.st_size),
+            "ckpt_mtime": int(stat.st_mtime),
+            "use_ema": args.use_ema,
+            "guidance_scale": args.guidance_scale,
+            "sampler": args.sampler,
+            "eta": args.eta,
+            "num_inference_steps": args.num_inference_steps,
+            "seed": args.seed,
+        }
+
     g_tag = f"g{args.guidance_scale:g}"
     for ckpt_path in ckpt_paths:
         stem = os.path.splitext(os.path.basename(ckpt_path))[0]
@@ -263,11 +288,15 @@ def main() -> None:
         fig_path = os.path.join(eval_dir, f"{stem}_{g_tag}_examples.png")
         print(f"\n=== {stem} ===")
 
+        fp = fingerprint(ckpt_path)
         info = {}
         if os.path.exists(yaml_path):
             with open(yaml_path) as f:
                 info = yaml.safe_load(f)
-            if set(classifier_names) <= set(info.get("classifiers", {})):
+            if info.get("fingerprint") != fp:
+                print(f"{yaml_path} was computed with different inputs/settings -- recomputing from scratch")
+                info = {}
+            elif set(classifier_names) <= set(info.get("classifiers", {})):
                 print(f"All requested classifiers already scored in {yaml_path} -- skipping")
                 continue
 
@@ -275,10 +304,13 @@ def main() -> None:
         used_ema = args.use_ema and "ema_state_dict" in diff_ckpt
 
         # --- generate (or reuse cached) images for this checkpoint ---
-        generated = torch.load(generated_path) if os.path.exists(generated_path) else None
-        if generated is not None and generated.shape[0] == originals.shape[0]:
+        cache = torch.load(generated_path) if os.path.exists(generated_path) else None
+        if isinstance(cache, dict) and cache.get("fingerprint") == fp:
+            generated = cache["images"]
             print(f"Loaded {generated.shape[0]} cached generated images from {generated_path}")
         else:
+            if cache is not None:
+                print(f"Ignoring stale cache {generated_path} (different inputs/settings) -- regenerating")
             unet.load_state_dict(diff_ckpt["model_state_dict"])
             if used_ema:
                 unet.load_state_dict(ema_shadow_to_model_state_dict(unet, diff_ckpt["ema_state_dict"]["shadow"]))
@@ -292,7 +324,7 @@ def main() -> None:
             for i in tqdm(range(0, latents.shape[0], args.batch_size), desc=f"Sampling {stem}"):
                 batches.append(generate(latents[i:i + args.batch_size].to(device)).cpu())
             generated = torch.cat(batches)
-            torch.save(generated, generated_path)
+            torch.save({"images": generated, "fingerprint": fp}, generated_path)
             print(f"Saved {generated.shape[0]} generated images to {generated_path}")
 
         # --- classify + score ---
@@ -326,6 +358,7 @@ def main() -> None:
             "seed": args.seed,
             "experiment_name": getattr(cfg, "experiment_name", None),
             "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "fingerprint": fp,
             "classifiers": scores,
         }
         with open(yaml_path, "w") as f:
