@@ -13,13 +13,14 @@ Deliberate deviations from the notebook (script context, not a Colab notebook):
     as scripts/diffusion_train.py).
   - Dropped the tiny_imagenet/imagenet64 dataset-staging cell -- that copied data onto
     Colab's local runtime disk for speed; a local/VM run already has data_dir on disk.
-  - Every plt.show() becomes plt.savefig() into <diff_cfg.output_dir>/inspection/ --
+  - Every plt.show() becomes plt.savefig() into <diff_cfg.output_dir>/inspection/<ckpt stem>/ --
     there's no inline display in a headless script run.
   - Notebook Config-cell variables became CLI flags (see parse_args below) so a VM run
     doesn't require editing the file -- defaults match the notebook's Config cell.
 
 Run from repo root:
     python -m scripts.inspect_diffusion --diffusion_config_path config/diffusion_full_imagenet64_flow_uncond.yaml
+    # latest checkpoint by default; or --ckpt 200000 / --ckpt best_ckpt.pt / --ckpt path/to/ckpt.pt
 """
 
 import os
@@ -37,15 +38,19 @@ from models.unet import UNet
 from models.ema import ema_shadow_to_model_state_dict
 from models.noise_process import DDPM, RectifiedFlow, VPSDE
 from data_utils import resolve_latents_paths
-from utils import discover_device, make_noise_schedule, diffusion_sample, flow_sample, vpsde_sample, make_run_tag
+from utils import (
+    discover_device, make_noise_schedule, diffusion_sample, flow_sample, vpsde_sample, make_run_tag,
+    select_checkpoints,
+)
 
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--diffusion_config_path", type=str,
                     default="config/diffusion_full_imagenet64_flow_uncond.yaml")
-    p.add_argument("--diffusion_ckpt_path", type=str, default=None,
-                    help="None -> load best_ckpt.pt from the run's checkpoints dir")
+    p.add_argument("--ckpt", "--diffusion_ckpt_path", dest="ckpt", type=str, default="latest",
+                    help="'latest' (highest-step ckpt_step_*.pt in the run's checkpoints dir, default), a step "
+                         "number (e.g. 200000), a filename in that dir (e.g. best_ckpt.pt), or a path to a checkpoint")
     p.add_argument("--unconditional", action=argparse.BooleanOptionalAction, default=True,
                     help="True -> skip beta-VAE / precomputed latents, pass z=0")
     p.add_argument("--load_test_images", action=argparse.BooleanOptionalAction, default=None,
@@ -64,7 +69,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--num_inference_steps", type=int, default=100,
                     help="Steps for ddim/flow/vpsde; ddpm always uses all T steps")
     p.add_argument("--output_dir", type=str, default=None,
-                    help="Where to save figures. Defaults to <diffusion run output_dir>/inspection")
+                    help="Where to save figures. Defaults to <diffusion run output_dir>/inspection/<checkpoint stem>")
     args = p.parse_args()
     if args.load_test_images is None:
         args.load_test_images = not args.unconditional
@@ -90,8 +95,6 @@ def main():
         diff_cfg = types.SimpleNamespace(**yaml.safe_load(f))
     diff_cfg.output_dir = f"{diff_cfg.output_dir}_{make_run_tag(diff_cfg)}"
 
-    inspect_dir = args.output_dir or os.path.join(diff_cfg.output_dir, "inspection")
-    os.makedirs(inspect_dir, exist_ok=True)
 
     # --- frozen beta-VAE, only loaded when the diffusion model actually conditions on one ---
     if args.unconditional:
@@ -137,12 +140,14 @@ def main():
         latent_dim=diff_cfg.latent_dim,
     )
 
-    diffusion_ckpt_path = args.diffusion_ckpt_path
-    if diffusion_ckpt_path is None:
-        ckpt_dir = os.path.join(diff_cfg.output_dir, "checkpoints")
-        diffusion_ckpt_path = os.path.join(ckpt_dir, "best_ckpt.pt")
-        if not os.path.exists(diffusion_ckpt_path):
-            raise FileNotFoundError(f"best_ckpt.pt not found in {ckpt_dir}")
+    if args.ckpt == "all" or "," in args.ckpt:
+        raise ValueError("--ckpt takes a single checkpoint")
+    diffusion_ckpt_path = select_checkpoints(os.path.join(diff_cfg.output_dir, "checkpoints"), args.ckpt)[0]
+
+    # one subfolder per checkpoint, so inspecting several checkpoints doesn't overwrite figures
+    ckpt_stem = os.path.splitext(os.path.basename(diffusion_ckpt_path))[0]
+    inspect_dir = args.output_dir or os.path.join(diff_cfg.output_dir, "inspection", ckpt_stem)
+    os.makedirs(inspect_dir, exist_ok=True)
 
     diff_ckpt = torch.load(diffusion_ckpt_path, map_location=device)
     unet.load_state_dict(diff_ckpt["model_state_dict"])

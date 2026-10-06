@@ -63,7 +63,7 @@ outputs/
     ├── checkpoints/                         # best_ckpt.pt, ckpt_step_0025000.pt, ...
     ├── visualizations/
     ├── fid_eval/                            # written by calculate_fid_sweep
-    └── inspection/                          # written by inspect_diffusion
+    └── inspection/<checkpoint>/             # written by inspect_diffusion
 ```
 
 The run tag is built from the config (image size, channels, noise process, latent dim), and includes the encoder name for runs conditioned on precomputed latents.
@@ -152,7 +152,7 @@ python -m scripts.inspect_diffusion \
     --no-unconditional --guidance_scale 2.0
 ```
 
-Loads `best_ckpt.pt` unless `--diffusion_ckpt_path` is given, and saves one-step predictions, final samples and a denoising progression into `<run>/inspection/`.
+Loads the latest `ckpt_step_*.pt` unless `--ckpt` picks another (a step number, `best_ckpt.pt`, or a path), and saves one-step predictions, final samples and a denoising progression into `<run>/inspection/<checkpoint>/`.
 
 ### 6. Stable Diffusion with CLIP-image conditioning
 

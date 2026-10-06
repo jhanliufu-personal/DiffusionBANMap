@@ -40,7 +40,6 @@ Run from repo root:
 """
 
 import os
-import glob
 import json
 import types
 import argparse
@@ -57,7 +56,9 @@ from tqdm import tqdm
 
 from models.unet import UNet
 from models.ema import ema_shadow_to_model_state_dict
-from utils import make_noise_schedule, diffusion_sample, flow_sample, vpsde_sample, discover_device
+from utils import (
+    make_noise_schedule, diffusion_sample, flow_sample, vpsde_sample, discover_device, select_checkpoints,
+)
 from data_utils import build_dataloaders, build_imagenet64_val_dataloader
 
 
@@ -98,25 +99,6 @@ def parse_args() -> argparse.Namespace:
                    help="Override/fill in config.json's encoding_model (e.g. alexnet_fc6 for older runs)")
     p.add_argument("--data_dir", type=str, default=None, help="Override config.json's data_dir")
     return p.parse_args()
-
-
-def select_checkpoints(ckpt_dir: str, spec: str) -> list:
-    """Resolve --ckpts to checkpoint paths. Periodic saves are ckpt_step_{step:07d}.pt, so
-    lexicographic order is step order."""
-    periodic = sorted(glob.glob(os.path.join(ckpt_dir, "ckpt_step_*.pt")))
-    if spec in ("latest", "all"):
-        if not periodic:
-            raise FileNotFoundError(f"No ckpt_step_*.pt checkpoints in {ckpt_dir}")
-        return periodic[-1:] if spec == "latest" else periodic
-    paths = []
-    for item in (i.strip() for i in spec.split(",") if i.strip()):
-        name = f"ckpt_step_{int(item):07d}.pt" if item.isdigit() else item
-        path = os.path.join(ckpt_dir, name)
-        if not os.path.exists(path):
-            available = ", ".join(os.path.basename(p) for p in periodic) or "none"
-            raise FileNotFoundError(f"{path} not found (periodic checkpoints available: {available})")
-        paths.append(path)
-    return paths
 
 
 def build_val_subset_loader(cfg, n_images: int, batch_size: int, seed: int) -> DataLoader:

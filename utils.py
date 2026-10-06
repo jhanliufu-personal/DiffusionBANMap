@@ -4,6 +4,7 @@ Implements the exact loss function from Higgins et al. (2017) and training utili
 """
 
 import os
+import glob
 import math
 import torch
 import torch.distributed as dist
@@ -36,6 +37,31 @@ def make_run_tag(cfg) -> str:
         encoder = getattr(cfg, "encoding_model", None)
         encoder = f"_{encoder}" if encoder is not None and not uncond else ""
         return f"h{cfg.image_size}_mc{cfg.model_channels}_ch{ch}_T{T}_{sched}{uncond}{encoder}_z{cfg.latent_dim}"
+
+
+def select_checkpoints(ckpt_dir: str, spec: str) -> List[str]:
+    """Resolve a checkpoint selection to paths. spec is:
+      - "latest": the highest-step ckpt_step_*.pt in ckpt_dir
+      - "all":    every ckpt_step_*.pt in ckpt_dir
+      - a comma-separated list of steps (e.g. "200000"), filenames in ckpt_dir (e.g.
+        "best_ckpt.pt"), or paths to checkpoint files anywhere
+    Periodic saves are ckpt_step_{step:07d}.pt, so lexicographic order is step order."""
+    periodic = sorted(glob.glob(os.path.join(ckpt_dir, "ckpt_step_*.pt")))
+    if spec in ("latest", "all"):
+        if not periodic:
+            raise FileNotFoundError(f"No ckpt_step_*.pt checkpoints in {ckpt_dir}")
+        return periodic[-1:] if spec == "latest" else periodic
+    paths = []
+    for item in (i.strip() for i in spec.split(",") if i.strip()):
+        if item.isdigit():
+            path = os.path.join(ckpt_dir, f"ckpt_step_{int(item):07d}.pt")
+        else:
+            path = item if os.path.isfile(item) else os.path.join(ckpt_dir, item)
+        if not os.path.exists(path):
+            available = ", ".join(os.path.basename(p) for p in periodic) or "none"
+            raise FileNotFoundError(f"{path} not found (periodic checkpoints available: {available})")
+        paths.append(path)
+    return paths
 
 
 def discover_device() -> Literal["cuda", "mps", "cpu"]:

@@ -24,6 +24,7 @@ outputs/
 *.npz
 *.pt
 *.pth
+*.png
 
 # Wandb
 wandb/
