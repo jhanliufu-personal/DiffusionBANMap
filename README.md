@@ -64,7 +64,8 @@ outputs/
     ├── visualizations/
     ├── fid_eval/                            # written by calculate_fid_sweep
     ├── class_agreement/                     # written by class_agreement_sweep
-    └── inspection/<checkpoint>/             # written by inspect_diffusion
+    ├── inspection/<checkpoint>/             # written by inspect_diffusion
+    └── generation/<checkpoint>_<targets>/   # written by generate
 ```
 
 The run tag is built from the config (image size, channels, noise process, latent dim), and includes the encoder name for runs conditioned on precomputed latents.
@@ -155,7 +156,25 @@ python -m scripts.inspect_diffusion \
 
 Loads the latest `ckpt_step_*.pt` unless `--ckpt` picks another (a step number, `best_ckpt.pt`, or a path), and saves one-step predictions, final samples and a denoising progression into `<run>/inspection/<checkpoint>/`.
 
-### 6. Class agreement (does the generated image keep the original's class?)
+### 6. Generate samples for an experiment
+
+```bash
+# oracle: condition on the real image's own latent, 100 val stimuli x 4 seeds
+python -m scripts.generate \
+    --diffusion_config_path config/diffusion_full_stimuli_finetune_flow.yaml
+
+# neural: condition on features decoded from firing rates, held-out stimuli only
+python -m scripts.generate \
+    --diffusion_config_path config/diffusion_full_stimuli_finetune_flow.yaml \
+    --targets decoded --decoded_path neuron_maps/decode_dinov2_meanpatch/pred_val.npy \
+    --indices splits/neural_holdout.npz:heldout
+```
+
+Several samples per stimulus, each (stimulus, seed) pair from its own fixed starting noise. Writes `samples.npy` (uint8, `[N, n_seeds, H, W, 3]`), `meta.json` and `grid.png` (top row the real images, then one row per seed) into `<run>/generation/<checkpoint>_<targets>/`, or `--output_dir`. The format is the one NeuralGuidance's `scripts/generate.py` writes, so its `scripts/evaluate.py --run <dir>` scores these runs alongside the test-time steering ones.
+
+`--decoded_path` is the `pred_val.npy` of a NeuralGuidance decode map (`scripts/fit_neuron_map.py --direction decode`). If it is in the encoder's native dimension it is projected onto the model's PCs with the scaler and PCA saved next to the conditioning latents; if it already has `latent_dim` columns it is used as is. `--targets none` generates with z = 0, the unconditional floor.
+
+### 7. Class agreement (does the generated image keep the original's class?)
 
 ```bash
 # latest checkpoint of a run
@@ -174,7 +193,7 @@ python -m scripts.class_agreement_sweep --run_dir outputs/<run> --encoding_model
 
 For a fixed random subset of the run's val images, generates one image from each image's conditioning embedding and checks whether ImageNet classifiers (`alexnet`, `resnet50`, `vit_b_16`) give the original and the generated image the same class. The run is given by its output folder, not its config, since several runs can share a config. Writes `<checkpoint>_g{guidance}.yaml` (top-1 / top-5 agreement, a shuffled-pair chance baseline, per-image labels), an example figure and a cache of the generated images into `<run>/class_agreement/`. With AlexNet fc6 conditioning, read the `resnet50` or `vit_b_16` numbers: AlexNet's own class output is computed from fc6. `notebooks/class_agreement.ipynb` plots the yaml files.
 
-### 7. Stable Diffusion with CLIP-image conditioning
+### 8. Stable Diffusion with CLIP-image conditioning
 
 Uses a pretrained SD 1.x image-variations checkpoint instead of this repo's UNet: SD-VAE latents are partially re-noised and denoised conditioned on CLIP ViT-L/14 image embeddings.
 
@@ -200,7 +219,7 @@ python -m scripts.sd_conditioning_eval --output_dir outputs/sd_clip_img2img \
 
 Latents or CLIP embeddings regressed from firing rates (`analysis/firing_rate_to_latent.ipynb`) are passed through the same `--latents_path` / `--cond_path` flags. `sd_clip_img2img` always writes `denoised_images.pt`; for the eval, rename each non-reference run's file to `{tag}_denoised_images.pt` in the same directory (known tags are listed in `TAG_LABELS` in `scripts/sd_conditioning_eval.py`).
 
-### 8. Beta-VAE (legacy)
+### 9. Beta-VAE (legacy)
 
 ```bash
 python -m scripts.betavae_train --config config/betavae_full_stimuli.yaml

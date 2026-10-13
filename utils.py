@@ -653,6 +653,7 @@ def diffusion_sample(
     guidance_scale: float = 1.0,
     verbose: bool = False,
     n_snapshots: int = 10,
+    x_init: Optional[torch.Tensor] = None,
 ):
     """
     Generate images conditioned on beta-VAE latents z [B, latent_dim].
@@ -668,6 +669,9 @@ def diffusion_sample(
     verbose=True: returns (image, snapshots) where snapshots is a list of
     (t, cpu_tensor [B,C,H,W]) captured at n_snapshots evenly-spaced steps,
     ordered noisy → clean.
+
+    x_init: optional standard-normal starting noise [B, C, H, W], so a caller can fix
+    the starting point of each sample. Drawn here if None.
     """
     T   = diff_config.num_timesteps
     B   = z.shape[0]
@@ -695,7 +699,7 @@ def diffusion_sample(
         capture_at.add(len(timesteps) - 1)
         snapshots: List[Tuple[int, torch.Tensor]] = []
 
-    x      = torch.randn(B, C, H, W, device=device)
+    x      = torch.randn(B, C, H, W, device=device) if x_init is None else x_init.to(device)
     z_null = torch.zeros_like(z)
 
     for i, t_idx in enumerate(timesteps):
@@ -761,6 +765,7 @@ def flow_sample(
     guidance_scale: float = 1.0,
     verbose: bool = False,
     n_snapshots: int = 10,
+    x_init: Optional[torch.Tensor] = None,
 ):
     """
     Euler ODE sampler for rectified flow.
@@ -780,6 +785,8 @@ def flow_sample(
         verbose:        If True, returns (image, snapshots) where snapshots is a
                         list of (t_float, cpu_tensor [B,C,H,W]) at n_snapshots
                         evenly-spaced steps.
+        x_init:         Optional standard-normal starting noise [B, C, H, W];
+                        drawn here if None.
 
     Returns:
         Generated images [B, C, H, W] in [0, 1], or (images, snapshots) if verbose.
@@ -789,7 +796,7 @@ def flow_sample(
     embed_scale = getattr(config, 'num_timesteps', 1000)
     z_null = torch.zeros_like(z)
 
-    x = torch.randn(B, C, H, W, device=device)
+    x = torch.randn(B, C, H, W, device=device) if x_init is None else x_init.to(device)
     dt = 1.0 / num_steps
 
     if verbose:
@@ -838,6 +845,7 @@ def vpsde_sample(
     guidance_scale: float = 1.0,
     verbose: bool = False,
     n_snapshots: int = 10,
+    x_init: Optional[torch.Tensor] = None,
 ):
     """
     Euler-Maruyama reverse SDE sampler for VP SDE.
@@ -856,6 +864,8 @@ def vpsde_sample(
         num_steps:      Number of EM steps.
         guidance_scale: CFG scale; > 1 requires a CFG-trained model.
         verbose:        If True, returns (image, snapshots).
+        x_init:         Optional standard-normal starting noise [B, C, H, W]
+                        (scaled by σ(1) here); drawn here if None.
 
     Returns:
         Generated images [B, C, H, W] in [0, 1], or (images, snapshots) if verbose.
@@ -875,7 +885,7 @@ def vpsde_sample(
     # Initialize from prior: x(1) ~ N(0, σ(1)² I)
     t1 = torch.ones(B, device=device)
     sigma1 = vpsde.sigma(t1)[:, None, None, None]
-    x = sigma1 * torch.randn(B, C, H, W, device=device)
+    x = sigma1 * (torch.randn(B, C, H, W, device=device) if x_init is None else x_init.to(device))
 
     timesteps = torch.linspace(1.0, dt, num_steps, device=device)
 
