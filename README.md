@@ -63,6 +63,7 @@ outputs/
     ├── checkpoints/                         # best_ckpt.pt, ckpt_step_0025000.pt, ...
     ├── visualizations/
     ├── fid_eval/                            # written by calculate_fid_sweep
+    ├── class_agreement/                     # written by class_agreement_sweep
     └── inspection/<checkpoint>/             # written by inspect_diffusion
 ```
 
@@ -76,7 +77,7 @@ The run tag is built from the config (image size, channels, noise process, laten
 | `encoding_model: <encoder>` + `latent_dim: N` | precomputed latents from `<data_dir>/../{dataset_type}_{encoder}_pca_latents/{train,val}_latents_z{N}.npy`; an error if the files are missing |
 | `betavae_config_path` + `betavae_ckpt_path` | beta-VAE latents, encoded on the fly |
 
-Available encoders: `alexnet_fc6`, `clip_vit_b32`, `clip_vit_l14`, `dino_vitb16`, `dinov2_vits14`, `dinov2_vitb14`, `dinov2_vitl14`, `sd_vae` (no PCA; used for the Stable Diffusion experiments).
+Available encoders: `alexnet_fc6`, `clip_vit_b32`, `clip_vit_l14`, `dino_vitb16`, `dinov2_vits14`, `dinov2_vitb14_cls`, `dinov2_vitl14`, `dinov2_vitb14_meanpatch` (mean of the patch tokens, CLS excluded), `sd_vae` (no PCA; used for the Stable Diffusion experiments).
 
 ---
 
@@ -99,7 +100,7 @@ python scripts/prepare_imagenet64_dataset.py \
 ```bash
 # ImageNet64, DINOv2 ViT-B/14, top 200 PCs
 python -m scripts.extract_image_embeddings \
-    --model dinov2_vitb14 \
+    --model dinov2_vitb14_cls \
     --dataset imagenet64 --data-dir data/imagenet64 \
     --n-components 200 --subsample-size 50000
 
@@ -154,7 +155,26 @@ python -m scripts.inspect_diffusion \
 
 Loads the latest `ckpt_step_*.pt` unless `--ckpt` picks another (a step number, `best_ckpt.pt`, or a path), and saves one-step predictions, final samples and a denoising progression into `<run>/inspection/<checkpoint>/`.
 
-### 6. Stable Diffusion with CLIP-image conditioning
+### 6. Class agreement (does the generated image keep the original's class?)
+
+```bash
+# latest checkpoint of a run
+python -m scripts.class_agreement_sweep \
+    --run_dir outputs/diffusion_full_imagenet64_flow_grad_accum_ema_h64_mc192_ch1x2x3x4_T1000_flow_alexnet_fc6_z200 \
+    --classifiers alexnet,resnet50 --n_images 1000 --guidance_scale 1.0
+
+# other checkpoints: steps, filenames in <run>/checkpoints, or all of them
+python -m scripts.class_agreement_sweep --run_dir outputs/<run> --ckpts best_ckpt.pt
+python -m scripts.class_agreement_sweep --run_dir outputs/<run> --ckpts 100000,200000
+python -m scripts.class_agreement_sweep --run_dir outputs/<run> --ckpts all
+
+# runs trained before encoding_model existed in the config
+python -m scripts.class_agreement_sweep --run_dir outputs/<run> --encoding_model alexnet_fc6
+```
+
+For a fixed random subset of the run's val images, generates one image from each image's conditioning embedding and checks whether ImageNet classifiers (`alexnet`, `resnet50`, `vit_b_16`) give the original and the generated image the same class. The run is given by its output folder, not its config, since several runs can share a config. Writes `<checkpoint>_g{guidance}.yaml` (top-1 / top-5 agreement, a shuffled-pair chance baseline, per-image labels), an example figure and a cache of the generated images into `<run>/class_agreement/`. With AlexNet fc6 conditioning, read the `resnet50` or `vit_b_16` numbers: AlexNet's own class output is computed from fc6. `notebooks/class_agreement.ipynb` plots the yaml files.
+
+### 7. Stable Diffusion with CLIP-image conditioning
 
 Uses a pretrained SD 1.x image-variations checkpoint instead of this repo's UNet: SD-VAE latents are partially re-noised and denoised conditioned on CLIP ViT-L/14 image embeddings.
 
@@ -180,7 +200,7 @@ python -m scripts.sd_conditioning_eval --output_dir outputs/sd_clip_img2img \
 
 Latents or CLIP embeddings regressed from firing rates (`analysis/firing_rate_to_latent.ipynb`) are passed through the same `--latents_path` / `--cond_path` flags. `sd_clip_img2img` always writes `denoised_images.pt`; for the eval, rename each non-reference run's file to `{tag}_denoised_images.pt` in the same directory (known tags are listed in `TAG_LABELS` in `scripts/sd_conditioning_eval.py`).
 
-### 7. Beta-VAE (legacy)
+### 8. Beta-VAE (legacy)
 
 ```bash
 python -m scripts.betavae_train --config config/betavae_full_stimuli.yaml

@@ -32,7 +32,7 @@ def make_run_tag(cfg) -> str:
         
         uncond = "_uncond" if getattr(cfg, "unconditional", False) else ""
         # Runs conditioned on precomputed latents are also tagged with the encoder they
-        # came from, so e.g. alexnet_fc6 and dinov2_vitb14 runs at the same latent_dim
+        # came from, so e.g. alexnet_fc6 and dinov2_vitb14_cls runs at the same latent_dim
         # don't share an output_dir.
         encoder = getattr(cfg, "encoding_model", None)
         encoder = f"_{encoder}" if encoder is not None and not uncond else ""

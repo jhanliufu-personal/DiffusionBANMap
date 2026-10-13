@@ -349,7 +349,7 @@ def build_imagenet64_dataloaders(
     preloaded, since the full training set (~15 GB) can exceed a standard Colab
     runtime's RAM. Honors the benchmark's own train/val split.
 
-    If encoding_model is given (e.g. "alexnet_fc6", "dinov2_vitb14"), batches become
+    If encoding_model is given (e.g. "alexnet_fc6", "dinov2_vitb14_cls"), batches become
     (image, latent) tuples for precomputed-latent conditioning instead of plain image
     tensors. The latents are train_latents_z{latent_dim}.npy / val_latents_z{latent_dim}.npy
     in data_dir's sibling directory imagenet64_{encoding_model}_pca_latents (see

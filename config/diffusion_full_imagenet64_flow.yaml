@@ -29,7 +29,7 @@ cfg_uncond_prob: 0.1
 # <data_dir>/../{dataset_type}_{encoding_model}_pca_latents, written by
 # scripts/extract_image_embeddings.py (--model takes the same names as encoding_model).
 # encoding_model: alexnet_fc6
-encoding_model: dinov2_vitb14
+encoding_model: dinov2_vitb14_cls
 latent_dim: 50
 
 # Optimizer

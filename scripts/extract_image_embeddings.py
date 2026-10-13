@@ -31,9 +31,13 @@ Deliberate deviations from the notebook (script context, not a Colab notebook):
 
 Run from repo root (the Config constants below are the CLI defaults):
   python -m scripts.extract_image_embeddings
-  python -m scripts.extract_image_embeddings --model dinov2_vitb14 \
+  python -m scripts.extract_image_embeddings --model dinov2_vitb14_cls \
       --dataset imagenet64 --data-dir data/imagenet64 --n-components 200
-  # -> data/imagenet64_dinov2_vitb14_pca_latents/{train,val}_latents_z200.npy
+  # -> data/imagenet64_dinov2_vitb14_cls_pca_latents/{train,val}_latents_z200.npy
+  # mean of the DINOv2 patch tokens (CLS excluded) instead of the CLS token
+  python -m scripts.extract_image_embeddings --model dinov2_vitb14_meanpatch \
+      --dataset imagenet64 --data-dir data/imagenet64 --n-components 200
+  # -> data/imagenet64_dinov2_vitb14_meanpatch_pca_latents/{train,val}_latents_z200.npy
 """
 
 import os
@@ -164,16 +168,27 @@ def _make_clip_loader(model_id: str):
     return load_fn
 
 
-def _make_dino_loader(model_id: str):
+def _make_dino_loader(model_id: str, pooling: str = "cls"):
     """Return a load_fn(device) for a given DINO/DINOv2 checkpoint (e.g.
-    "facebook/dinov2-base"). Returns the final-layer CLS token after the last
-    LayerNorm (384-d for ViT-S, 768-d for ViT-B, 1024-d for ViT-L) -- the
-    standard DINO global image embedding. Read from last_hidden_state[:, 0]
-    rather than pooler_output: the two are identical for DINOv2, but for the
-    original DINO (a plain ViTModel) pooler_output goes through an extra
-    dense+tanh head that isn't in the DINO checkpoint, i.e. randomly
-    initialized. Input is resized straight to 224x224 like the other encoders
-    (a multiple of both patch sizes, 14 and 16)."""
+    "facebook/dinov2-base"). Returns a final-layer token after the last
+    LayerNorm (384-d for ViT-S, 768-d for ViT-B, 1024-d for ViT-L), selected
+    by `pooling`:
+
+      "cls": the CLS token -- the standard DINO global image embedding. Read
+        from last_hidden_state[:, 0] rather than pooler_output: the two are
+        identical for DINOv2, but for the original DINO (a plain ViTModel)
+        pooler_output goes through an extra dense+tanh head that isn't in the
+        DINO checkpoint, i.e. randomly initialized.
+      "meanpatch": the mean of the patch tokens only (256 of them at 224x224
+        with patch size 14). The CLS token -- and any register tokens, for
+        checkpoints that have them -- sit before the patch tokens in
+        last_hidden_state and are excluded. This is the global feature REPA /
+        REPA-G work with: REPA aligns the denoiser to patch tokens, not CLS.
+
+    Input is resized straight to 224x224 like the other encoders (a multiple
+    of both patch sizes, 14 and 16)."""
+    assert pooling in ("cls", "meanpatch"), f"unknown pooling {pooling!r}"
+
     def load_fn(device):
         from transformers import AutoModel, AutoImageProcessor
 
@@ -183,12 +198,18 @@ def _make_dino_loader(model_id: str):
 
         processor = AutoImageProcessor.from_pretrained(model_id)
         normalize = transforms.Normalize(mean=processor.image_mean, std=processor.image_std)
+        # token layout of last_hidden_state: [CLS, (register tokens), patch tokens]
+        n_prefix_tokens = 1 + getattr(dino_model.config, "num_register_tokens", 0)
 
         @torch.no_grad()
         def extract_batch(batch) -> np.ndarray:
             images = batch[0] if isinstance(batch, (list, tuple)) else batch
             images = normalize(images).to(device)
-            features = dino_model(pixel_values=images).last_hidden_state[:, 0]
+            tokens = dino_model(pixel_values=images).last_hidden_state
+            if pooling == "cls":
+                features = tokens[:, 0]
+            else:
+                features = tokens[:, n_prefix_tokens:].mean(dim=1)
             return features.cpu().numpy()
 
         def cleanup():
@@ -263,8 +284,8 @@ MODEL_REGISTRY = {
         "image_size": 224,
         "load_fn": _make_dino_loader("facebook/dinov2-small"),
     },
-    "dinov2_vitb14": {
-        "display_name": "DINOv2 ViT-B/14 (facebook/dinov2-base)",
+    "dinov2_vitb14_cls": {
+        "display_name": "DINOv2 ViT-B/14, CLS token (facebook/dinov2-base)",
         "image_size": 224,
         "load_fn": _make_dino_loader("facebook/dinov2-base"),
     },
@@ -272,6 +293,11 @@ MODEL_REGISTRY = {
         "display_name": "DINOv2 ViT-L/14 (facebook/dinov2-large)",
         "image_size": 224,
         "load_fn": _make_dino_loader("facebook/dinov2-large"),
+    },
+    "dinov2_vitb14_meanpatch": {
+        "display_name": "DINOv2 ViT-B/14, mean patch token (facebook/dinov2-base)",
+        "image_size": 224,
+        "load_fn": _make_dino_loader("facebook/dinov2-base", pooling="meanpatch"),
     },
     "sd_vae": {
         "display_name": "Stable Diffusion VAE (stabilityai/sd-vae-ft-mse)",
