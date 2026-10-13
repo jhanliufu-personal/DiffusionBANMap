@@ -15,7 +15,9 @@ The full un-PCA'd embeddings are kept alongside them as train_embeddings.npy /
 val_embeddings.npy, and PCA is always computed from those files. So the encoder
 only ever runs once per dataset + model: re-running with a different
 --n-components just re-fits PCA on the saved embeddings (no encoder load, no
-image pass).
+image pass). The same holds if the embeddings were first saved without PCA
+({dataset}_{model}_latents/{split}_latents.npy): a later --n-components run
+reads them from there.
 
 Exists as a plain script so this can run outside a Jupyter kernel -- useful if
 the notebook's kernel crashes/runs out of memory (e.g. sd_vae at IMAGE_SIZE=512
@@ -480,6 +482,17 @@ def main():
     # is computed from; without PCA they are the output itself ({split}_latents.npy).
     raw_suffix = "embeddings.npy" if args.n_components is not None else "latents.npy"
     raw_paths = {split: os.path.join(args.output_dir, f"{split}_{raw_suffix}") for split in encode_dls}
+    if args.n_components is not None and args.output_dir.endswith("_pca_latents"):
+        # A run without --n-components (here or in NeuralGuidance, which writes the same
+        # layout) has already saved these exact embeddings as {split}_latents.npy in the
+        # sibling {dataset}_{model}_latents directory: read them from there instead of
+        # encoding the images a second time.
+        no_pca_dir = args.output_dir.removesuffix("_pca_latents") + "_latents"
+        for split, path in raw_paths.items():
+            no_pca_path = os.path.join(no_pca_dir, f"{split}_latents.npy")
+            if not os.path.exists(path) and os.path.exists(no_pca_path):
+                print(f"Reusing un-PCA'd embeddings: {no_pca_path}")
+                raw_paths[split] = no_pca_path
     for split, path in raw_paths.items():
         if os.path.exists(path):
             n_saved, n_images = len(np.load(path, mmap_mode="r")), len(encode_dls[split].dataset)
