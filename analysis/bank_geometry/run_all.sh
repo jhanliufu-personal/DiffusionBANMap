@@ -1,11 +1,15 @@
 #!/bin/bash
 # Full bank-geometry pipeline (resumable: finished steps are skipped). Run from anywhere.
 #   DBM_CKPT=latest ./analysis/bank_geometry/run_all.sh      # also runs the diffusion cycle test
+#   PYTHON=python ./analysis/bank_geometry/run_all.sh        # use the active (e.g. conda) env instead of uv;
+#                                                            # then `pip install "rembg[cpu]"` once for the cut-outs
 set -e
 cd "$(dirname "$0")/../.."
 L=outputs/bank_geometry/logs
 mkdir -p $L
-PY="uv run python -m analysis.bank_geometry"
+PYTHON=${PYTHON:-"uv run python"}
+PY="$PYTHON -m analysis.bank_geometry"
+if [ "$PYTHON" = "uv run python" ]; then REMBG_PY='uv run --with rembg[cpu] python'; else REMBG_PY=$PYTHON; fi
 
 # 0. decoder-bench out-of-fold predictions that q1/q2/dbm_cycle read (skipped if already present)
 for t in meanpatch cls; do
@@ -13,13 +17,13 @@ for t in meanpatch cls; do
   for m in ridge rescale_per_dim snap_bank bayes_gmm32_bank bayes_bank_posterior bayes_bank_posterior_map; do
     [ -f outputs/decoder_bench/preds_${t}_${m}.npy ] || need="$need $m"
   done
-  if [ -n "$need" ]; then uv run python -m analysis.decoder_bench.exp1_methods $t $need 2>&1 | tee -a $L/decoder_bench_$t.log; fi
+  if [ -n "$need" ]; then $PYTHON -m analysis.decoder_bench.exp1_methods $t $need 2>&1 | tee -a $L/decoder_bench_$t.log; fi
 done
 
 # 1. embeddings (GPU). Cut-outs need rembg; they are skipped if already on disk.
 $PY.build_imagesets edits            2>&1 | tee $L/edits.log
 $PY.build_imagesets inet_list        2>&1 | tee $L/inet_list.log
-uv run --with "rembg[cpu]" python -m analysis.bank_geometry.build_imagesets inet_cutout 2>&1 | tee $L/cutout.log
+$REMBG_PY -m analysis.bank_geometry.build_imagesets inet_cutout 2>&1 | tee $L/cutout.log
 $PY.build_imagesets inet_raw         2>&1 | tee $L/inet_raw.log
 $PY.build_imagesets inet_styled      2>&1 | tee $L/inet_styled.log
 $PY.build_imagesets inet_gray        2>&1 | tee $L/inet_gray.log
