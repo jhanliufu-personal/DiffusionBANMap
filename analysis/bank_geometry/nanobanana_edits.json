@@ -1,0 +1,32 @@
+{
+  "_doc": "Semantic one-unit edits for nanobanana_edits.py. Each family is applied k = 1..n_units times in a chain (step k edits the output of step k-1), so one unit = one application of `prompt`. `bases` are rows (0-based) of the sorted 500Stimuli folder; null = the same 100 random bases as the controlled edits (build_imagesets.py edits). Put face stimuli in `bases` for face-specific families. The style suffix is appended to every prompt.",
+  "model": "gemini-2.5-flash-image",
+  "style_suffix": " Keep it a grayscale photograph of the same single object, centred on a plain pure-white background, with the same lighting and framing. Change nothing else.",
+  "families": {
+    "view_yaw": {
+      "prompt": "Rotate the object about its vertical axis by about 30 degrees, so it is seen from a slightly different viewpoint.",
+      "n_units": 4,
+      "bases": null
+    },
+    "elongate": {
+      "prompt": "Make the object about 20% wider horizontally, keeping its height the same.",
+      "n_units": 4,
+      "bases": null
+    },
+    "stripes": {
+      "prompt": "Add a stripe pattern to the object's surface; if it already has stripes, make them more pronounced.",
+      "n_units": 3,
+      "bases": null
+    },
+    "add_copy": {
+      "prompt": "Add one more copy of the object next to the existing ones, all the same size.",
+      "n_units": 3,
+      "bases": null
+    },
+    "face_yaw": {
+      "prompt": "Turn the person's head about 20 degrees further toward their left (the viewer's right). Keep the identity and expression the same.",
+      "n_units": 4,
+      "bases": []
+    }
+  }
+}
